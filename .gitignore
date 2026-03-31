@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# App data (user-specific, not for version control)
+.yt_config.json
+.yt_history.json
+
+# Downloads
+downloads/
+
+# IDE / editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
