@@ -1,14 +1,17 @@
+import re
 import sys
 import os
 import csv
 import io
 import json
+import time
 import threading
 import subprocess
 import datetime
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 from typing import Any
+from urllib.parse import urlparse
 from urllib.request import urlopen, Request
 
 import yt_dlp
@@ -19,7 +22,7 @@ from download import (
     is_valid_url,
     get_ydl_version,
 )
-from config import load_config, save_config
+from config import load_config, save_config, DATA_DIR, atomic_write_json
 
 _has_pil = False
 try:
@@ -27,6 +30,10 @@ try:
     _has_pil = True
 except ImportError:
     pass
+
+# yt-dlp embeds ANSI color codes in _percent_str, _speed_str, _eta_str.
+# Tkinter cannot render them — they show as squares.  Strip them.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -44,15 +51,34 @@ TXT_ERROR   = "#f85149"
 TXT_WARN    = "#d29922"
 BORDER      = "#30363d"
 
-FONT_TITLE  = ("Segoe UI", 20, "bold")
-FONT_SUB    = ("Segoe UI", 11)
-FONT_LABEL  = ("Segoe UI", 11, "bold")
-FONT_INPUT  = ("Segoe UI", 12)
-FONT_BTN    = ("Segoe UI", 12, "bold")
-FONT_SMALL  = ("Segoe UI", 10)
-FONT_HIST   = ("Segoe UI", 10)
+def _ui_font() -> str:
+    """Return a platform-appropriate sans-serif font family."""
+    if sys.platform == "win32":
+        return "Segoe UI"
+    if sys.platform == "darwin":
+        return "Helvetica Neue"
+    return "sans-serif"
 
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yt_history.json")
+_FONT = _ui_font()
+FONT_TITLE  = (_FONT, 20, "bold")
+FONT_SUB    = (_FONT, 11)
+FONT_LABEL  = (_FONT, 11, "bold")
+FONT_INPUT  = (_FONT, 12)
+FONT_BTN    = (_FONT, 12, "bold")
+FONT_SMALL  = (_FONT, 10)
+FONT_HIST   = (_FONT, 10)
+
+HISTORY_FILE = os.path.join(DATA_DIR, ".yt_history.json")
+
+# Migrate from legacy location (next to source) if different
+_LEGACY_HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yt_history.json")
+if DATA_DIR != os.path.dirname(os.path.abspath(__file__)):
+    if os.path.exists(_LEGACY_HISTORY) and not os.path.exists(HISTORY_FILE):
+        try:
+            import shutil as _shutil
+            _shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
+        except OSError:
+            pass
 
 FORMAT_LABELS: dict[str, str] = {
     "Best Quality":      "best",
@@ -63,6 +89,23 @@ FORMAT_LABELS: dict[str, str] = {
 }
 _LABEL_BY_KEY: dict[str, str] = {v: k for k, v in FORMAT_LABELS.items()}
 
+_MAX_THUMB_BYTES = 5 * 1024 * 1024  # 5 MB safety limit for thumbnail downloads
+
+_UNSAFE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+
+
+def _is_safe_url(url: str) -> bool:
+    """Return True if *url* uses http(s) and does not target localhost/private."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return False
+        if parsed.hostname in _UNSAFE_HOSTS:
+            return False
+        return True
+    except Exception:
+        return False
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -71,7 +114,9 @@ def load_history() -> list[dict[str, str]]:
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            if isinstance(data, list):
+                return [e for e in data if isinstance(e, dict)]  # type: ignore[reportUnknownVariableType]
         except Exception:
             pass
     return []
@@ -79,8 +124,7 @@ def load_history() -> list[dict[str, str]]:
 
 def save_history(history: list[dict[str, str]]) -> None:
     try:
-        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
-            json.dump(history[-50:], f, indent=2, ensure_ascii=False)
+        atomic_write_json(HISTORY_FILE, history[-50:])
     except Exception:
         pass
 
@@ -108,9 +152,10 @@ class App(tk.Tk):
         self._history: list[dict[str, str]] = load_history()
         self._last_title: str = ""
         self._thumb_photo: Any = None  # prevent GC of PhotoImage
-        self._queue_index: int = 0
+
         self._queue_total: int = 0
         self._progress_determinate: bool = False
+        self._close_retries: int = 0
 
         self._cfg = load_config()
         self._apply_styles()
@@ -118,7 +163,8 @@ class App(tk.Tk):
         self._populate_from_config()
         self._center()
 
-        self.bind("<Return>", lambda e: None if e.widget is self.url_text else self._start_download())
+        self.bind("<Return>", lambda e: None if isinstance(e.widget, (tk.Text, tk.Entry, ttk.Entry, ttk.Combobox)) else self._start_download())
+        self.protocol("WM_DELETE_WINDOW", self._on_closing)
         threading.Thread(target=self._fetch_version, daemon=True).start()
 
     # ------------------------------------------------------------------
@@ -422,7 +468,7 @@ class App(tk.Tk):
             ver = get_ydl_version()
         except Exception:
             ver = "unknown"
-        self.after(0, self._show_version, ver)
+        self._safe_after(0, self._show_version, ver)
 
     def _show_version(self, ver: str) -> None:
         self.subtitle_var.set(
@@ -432,12 +478,33 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    def _safe_after(self, ms: int, func: Any, *args: Any) -> None:
+        """Like self.after() but silently ignores calls on a destroyed widget."""
+        try:
+            self.after(ms, func, *args)
+        except Exception:
+            pass
+
     def _center(self) -> None:
         self.update_idletasks()
         w, h = self.winfo_width(), self.winfo_height()
         x = (self.winfo_screenwidth()  - w) // 2
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"+{x}+{y}")
+
+    def _on_closing(self) -> None:
+        """Handle window close: cancel active download first, then destroy.
+
+        Forces destroy after ~5 seconds (25 retries) to prevent the window
+        from staying open indefinitely if the download thread blocks.
+        """
+        if self._download_active:
+            self._cancel_event.set()
+            self._close_retries += 1
+            if self._close_retries < 25:
+                self.after(200, self._on_closing)
+                return
+        self.destroy()
 
     def _set_status(self, msg: str, state: str = "idle") -> None:
         colors = {
@@ -466,8 +533,10 @@ class App(tk.Tk):
             return
         try:
             text = self.clipboard_get().strip()
-            if "youtube.com" in text or "youtu.be" in text:
-                self.url_text.insert("1.0", text)
+            # Only auto-paste lines that pass URL validation
+            valid_lines = [ln for ln in text.splitlines() if ln.strip() and is_valid_url(ln.strip())]
+            if valid_lines:
+                self.url_text.insert("1.0", "\n".join(valid_lines))
         except Exception:
             pass
 
@@ -478,11 +547,23 @@ class App(tk.Tk):
 
     def _open_folder(self) -> None:
         folder = self.dir_var.get().strip()
-        if os.path.isdir(folder):
+        self._open_path(folder)
+
+    def _open_path(self, folder: str) -> None:
+        """Open a folder in the system file manager, with error handling."""
+        if not folder or not os.path.isdir(folder):
+            return
+        try:
             if sys.platform == "win32":
                 os.startfile(folder)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", folder])
             else:
                 subprocess.Popen(["xdg-open", folder])
+        except FileNotFoundError:
+            self._set_status("Could not open folder (file manager not found)", "error")
+        except OSError:
+            self._set_status("Could not open folder", "error")
 
     def _copy_title(self) -> None:
         if self._last_title:
@@ -521,11 +602,7 @@ class App(tk.Tk):
         real_idx: int = len(self._history) - 1 - idx
         if 0 <= real_idx < len(self._history):
             folder: str = str(self._history[real_idx].get("path", ""))
-            if folder and os.path.isdir(folder):
-                if sys.platform == "win32":
-                    os.startfile(folder)
-                else:
-                    subprocess.Popen(["xdg-open", folder])
+            self._open_path(folder)
 
     def _export_history(self) -> None:
         if not self._history:
@@ -616,7 +693,7 @@ class App(tk.Tk):
             parts: list[str] = []
             if self._queue_total > 1:
                 parts.append(
-                    f"Downloading {self._queue_index} / {self._queue_total} URLs"
+                    f"Downloading {d.get('_queue_index', 0)} / {self._queue_total} URLs"
                 )
             if pl_idx and n_entries:
                 parts.append(f"Video {pl_idx} / {n_entries}")
@@ -653,11 +730,20 @@ class App(tk.Tk):
 
         self._download_active = True
         self._cancel_event.clear()
-        self._queue_index = 0
+
         self._queue_total = len(urls)
         self._progress_determinate = False
 
         self._save_current_config()
+
+        # Read tkinter variables on the main thread (thread-safe)
+        output_dir = self.dir_var.get().strip() or os.path.join(
+            os.path.expanduser("~"), "Downloads", "YouTube"
+        )
+        format_key   = FORMAT_LABELS.get(self.format_var.get(), "best")
+        subtitles    = self.sub_var.get()
+        sponsorblock = self.sponsor_var.get()
+        playlist     = self.playlist_var.get()
 
         # UI state
         self.btn.configure(state="disabled", bg="#444455")
@@ -670,104 +756,151 @@ class App(tk.Tk):
         self._set_status("Starting download\u2026", "loading")
 
         threading.Thread(
-            target=self._download_thread, args=(urls,), daemon=True,
+            target=self._download_thread,
+            args=(urls, output_dir, format_key, subtitles, sponsorblock, playlist),
+            daemon=True,
         ).start()
 
     def _cancel_download(self) -> None:
         self._cancel_event.set()
         self._set_status("Cancelling\u2026", "idle")
 
-    def _download_thread(self, urls: list[str]) -> None:
-        output_dir = self.dir_var.get().strip() or os.path.join(
-            os.path.expanduser("~"), "Downloads", "YouTube"
-        )
-        os.makedirs(output_dir, exist_ok=True)
+    def _download_thread(self, urls: list[str], output_dir: str,
+                         format_key: str, subtitles: bool,
+                         sponsorblock: bool, playlist: bool) -> None:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
 
-        format_key   = FORMAT_LABELS.get(self.format_var.get(), "best")
-        subtitles    = self.sub_var.get()
-        sponsorblock = self.sponsor_var.get()
-        playlist     = self.playlist_var.get()
+            success_count = 0
+            error_count   = 0
+            last_title    = "Unknown"
 
-        success_count = 0
-        error_count   = 0
-        last_title    = "Unknown"
+            _last_hook_time = 0.0
+            _current_queue_idx = 0
 
-        def gui_hook(d: dict[str, Any]) -> None:
-            if self._cancel_event.is_set():
-                raise DownloadError("Cancelled by user")
-            self.after(0, self._update_progress, dict(d))  # copy: main thread sees stable snapshot
-
-        for i, url in enumerate(urls, 1):
-            if self._cancel_event.is_set():
-                break
-
-            self._queue_index = i
-            self.after(0, self._reset_progress_for_url)
-
-            if self._queue_total > 1:
-                self.after(0, self._set_status,
-                           f"Fetching info \u2014 URL {i} / {len(urls)}\u2026",
-                           "loading")
-            else:
-                self.after(0, self._set_status,
-                           "Fetching info\u2026", "loading")
-
-            try:
-                opts = build_ydl_opts(
-                    output_dir=output_dir,
-                    progress_hooks=[gui_hook],
-                    quiet=True,
-                    format_preset=format_key,
-                    subtitles=subtitles,
-                    sponsorblock=sponsorblock,
-                    playlist=playlist,
-                )
-                with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
-                    raw = ydl.extract_info(url, download=False)
-                    info: dict[str, Any] = dict(raw)
-                    title = str(info.get("title", "Unknown"))
-                    last_title = title
-                    thumb_url = info.get("thumbnail", "")
-
-                    # Fetch thumbnail in this thread (I/O), display on main thread
-                    if thumb_url and _has_pil:
-                        try:
-                            req = Request(thumb_url,
-                                          headers={"User-Agent": "Mozilla/5.0"})
-                            thumb_data = urlopen(req, timeout=10).read()
-                            self.after(0, self._display_thumbnail, thumb_data, title)
-                        except Exception:
-                            pass
-
-                    ydl.process_ie_result(raw, download=True)  # reuse already-extracted info
-
-                success_count += 1
-                self.after(0, self._add_history, title, output_dir, "success")
-
-            except DownloadError as e:
-                if "Cancelled" in str(e):
-                    self.after(0, self._on_error, "Cancelled by user")
-                    return
-                error_count += 1
-                self.after(0, self._add_history,
-                           f"Failed: {url[:60]}", output_dir, "error")
-            except Exception:
+            def gui_hook(d: dict[str, Any]) -> None:
+                nonlocal _last_hook_time
                 if self._cancel_event.is_set():
-                    self.after(0, self._on_error, "Cancelled by user")
+                    raise DownloadError("Cancelled by user")
+                # Throttle UI updates to ~5/sec; always forward "finished" status
+                now = time.monotonic()
+                if d.get("status") != "finished" and (now - _last_hook_time) < 0.2:
                     return
-                error_count += 1
-                self.after(0, self._add_history,
-                           f"Failed: {url[:60]}", output_dir, "error")
+                _last_hook_time = now
+                # Extract only needed fields — avoids holding a ref to the
+                # large, mutable info_dict that yt-dlp may recycle.
+                info: dict[str, Any] = d.get("info_dict") or {}
+                snap: dict[str, Any] = {
+                    "status":               d.get("status"),
+                    "total_bytes":          d.get("total_bytes"),
+                    "total_bytes_estimate": d.get("total_bytes_estimate"),
+                    "downloaded_bytes":     d.get("downloaded_bytes", 0),
+                    "_speed_str":           _ANSI_RE.sub("", str(d.get("_speed_str", ""))),
+                    "_eta_str":             _ANSI_RE.sub("", str(d.get("_eta_str", ""))),
+                    "_percent_str":         _ANSI_RE.sub("", str(d.get("_percent_str", ""))),
+                    "_queue_index":         _current_queue_idx,
+                    "info_dict": {
+                        "playlist_index":      info.get("playlist_index"),
+                        "playlist_autonumber": info.get("playlist_autonumber"),
+                        "n_entries":           info.get("n_entries"),
+                        "playlist_count":      info.get("playlist_count"),
+                    },
+                }
+                self._safe_after(0, self._update_progress, snap)
 
-        # All URLs processed
-        if error_count == 0:
-            self.after(0, self._on_success, output_dir, last_title, success_count)
-        elif success_count > 0:
-            self.after(0, self._on_partial, output_dir, last_title,
-                       f"{success_count} succeeded, {error_count} failed")
-        else:
-            self.after(0, self._on_error,
-                       f"All {error_count} download(s) failed")
+            for i, url in enumerate(urls, 1):
+                if self._cancel_event.is_set():
+                    break
+
+                _current_queue_idx = i
+                self._safe_after(0, self._reset_progress_for_url)
+
+                if self._queue_total > 1:
+                    self._safe_after(0, self._set_status,
+                                     f"Fetching info \u2014 URL {i} / {len(urls)}\u2026",
+                                     "loading")
+                else:
+                    self._safe_after(0, self._set_status,
+                                     "Fetching info\u2026", "loading")
+
+                try:
+                    opts = build_ydl_opts(
+                        output_dir=output_dir,
+                        progress_hooks=[gui_hook],
+                        quiet=True,
+                        format_preset=format_key,
+                        subtitles=subtitles,
+                        sponsorblock=sponsorblock,
+                        playlist=playlist,
+                    )
+                    with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+                        raw = ydl.extract_info(url, download=False)
+                        if not raw:
+                            raise DownloadError("Could not extract video information")
+                        info: dict[str, Any] = dict(raw)
+                        title = str(info.get("title", "Unknown"))
+                        last_title = title
+                        thumb_url = info.get("thumbnail", "")
+
+                        # Fetch thumbnail in this thread (I/O), display on main thread
+                        if thumb_url and _has_pil and _is_safe_url(thumb_url):
+                            try:
+                                req = Request(thumb_url,
+                                              headers={"User-Agent": "Mozilla/5.0"})
+                                with urlopen(req, timeout=10) as resp:
+                                    thumb_data = resp.read(_MAX_THUMB_BYTES)
+                                self._safe_after(0, self._display_thumbnail, thumb_data, title)
+                            except Exception:
+                                pass
+
+                        # Verify formats exist before starting download (guards
+                        # against ignore_no_formats_error silently doing nothing)
+                        if not info.get("requested_formats") and not info.get("url"):
+                            fmt_list = info.get("formats")
+                            if not fmt_list:
+                                raise DownloadError(f"No downloadable formats for: {title}")
+
+                        # Use download([url]) instead of process_ie_result():
+                        # extract_info(download=False) returns an already-processed
+                        # result; calling process_ie_result() on it double-processes
+                        # and silently fails for playlists.
+                        ydl.download([url])
+
+                    success_count += 1
+                    self._safe_after(0, self._add_history, title, output_dir, "success")
+
+                except DownloadError as e:
+                    if "Cancelled" in str(e) or self._cancel_event.is_set():
+                        self._safe_after(0, self._on_error, "Cancelled by user")
+                        return
+                    error_count += 1
+                    err_msg = _ANSI_RE.sub("", str(e))[:120]
+                    self._safe_after(0, self._add_history,
+                                     f"Failed: {err_msg}", output_dir, "error")
+                except Exception as e:
+                    if self._cancel_event.is_set():
+                        self._safe_after(0, self._on_error, "Cancelled by user")
+                        return
+                    error_count += 1
+                    err_msg = _ANSI_RE.sub("", str(e))[:120]
+                    self._safe_after(0, self._add_history,
+                                     f"Failed: {err_msg}", output_dir, "error")
+
+            # All URLs processed — check cancel first to avoid false success
+            if self._cancel_event.is_set():
+                self._safe_after(0, self._on_error, "Cancelled by user")
+            elif error_count == 0:
+                self._safe_after(0, self._on_success, output_dir, last_title, success_count)
+            elif success_count > 0:
+                self._safe_after(0, self._on_partial, output_dir, last_title,
+                                 f"{success_count} succeeded, {error_count} failed")
+            else:
+                self._safe_after(0, self._on_error,
+                                 f"All {error_count} download(s) failed")
+        except Exception:
+            self._safe_after(0, self._on_error, "Unexpected error occurred")
+        finally:
+            self._safe_after(0, self._reset_ui)
 
     # ------------------------------------------------------------------
     # Result handlers
@@ -779,6 +912,8 @@ class App(tk.Tk):
             "path":   path,
             "status": status,
         })
+        if len(self._history) > 50:
+            self._history = self._history[-50:]
         save_history(self._history)
         self._refresh_history_ui()
 
@@ -792,7 +927,6 @@ class App(tk.Tk):
         self._hide_speed_eta()
 
     def _on_success(self, output_dir: str, title: str, count: int) -> None:
-        self._reset_ui()
         self.progress.configure(mode="determinate", value=100)
         self._last_title = title
         self.open_btn.pack(side="left", padx=(10, 0), ipadx=20, ipady=10)
@@ -807,7 +941,6 @@ class App(tk.Tk):
         self.url_text.focus_set()
 
     def _on_partial(self, output_dir: str, title: str, msg: str) -> None:
-        self._reset_ui()
         self.progress.configure(mode="determinate", value=50)  # partial: some succeeded
         self._last_title = title
         self.open_btn.pack(side="left", padx=(10, 0), ipadx=20, ipady=10)
@@ -815,14 +948,12 @@ class App(tk.Tk):
         self._set_status(msg, "error")
 
     def _on_error(self, msg: str) -> None:
-        self._reset_ui()
         self.progress.configure(mode="determinate", value=0)
         self._hide_thumbnail()
         if "Cancelled" in msg:
             self._set_status("Download cancelled.", "idle")
         else:
-            self._set_status(f"Error: {msg[:150]}", "error")
-            messagebox.showerror("Download Failed", msg)
+            self._set_status(f"\u274c  {msg[:200]}", "error")
 
 
 # ---------------------------------------------------------------------------

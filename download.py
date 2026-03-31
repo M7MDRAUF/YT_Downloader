@@ -16,7 +16,12 @@ from yt_dlp.utils import DownloadError
 _BROWSERS: list[str] = ["firefox", "chrome", "edge", "brave", "opera", "chromium", "vivaldi"]
 
 _YT_URL_RE = re.compile(
-    r"^https?://((www\.|music\.)?youtube\.com/(watch\?|shorts/|embed/|live/|playlist\?)|youtu\.be/)",
+    r"^https?://"
+    r"("
+    r"(www\.|m\.|music\.)?youtube\.com/"
+    r"(watch\?|shorts/|embed/|live/|playlist\?|clip/|v/|@[\w.-]+|channel/|c/|user/)"
+    r"|youtu\.be/"
+    r")",
 )
 
 
@@ -44,15 +49,29 @@ def is_valid_url(url: str) -> bool:
 
 
 def get_cookies_browser() -> str | None:
-    """Return the first browser whose cookie store is accessible, or None."""
+    """Return the first browser whose cookie store is accessible, or None.
+
+    The result is cached after the first call to avoid repeatedly probing
+    browser cookie stores on every download.
+    """
+    global _cookies_browser_cache, _cookies_browser_checked
+    if _cookies_browser_checked:
+        return _cookies_browser_cache
     for browser in _BROWSERS:
         try:
             with yt_dlp.YoutubeDL({"cookiesfrombrowser": (browser,), "quiet": True, "no_warnings": True}) as ydl:
                 ydl.cookiejar  # triggers cookie load
+            _cookies_browser_cache = browser
+            _cookies_browser_checked = True
             return browser
         except Exception:
             continue
+    _cookies_browser_checked = True
     return None
+
+
+_cookies_browser_cache: str | None = None
+_cookies_browser_checked: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -92,16 +111,38 @@ def build_ydl_opts(
         "progress_hooks": progress_hooks if progress_hooks is not None else [_cli_progress_hook],
         # Force the "main" player JS variant so the challenge solver can parse it.
         # The "tv" variant (tv-player-ias.js) currently breaks the solver.
-        "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
+        # Request DASH fragments ("dashy") so concurrent_fragment_downloads
+        # actually works — without this, YouTube serves single HTTPS streams
+        # where only sequential download is possible.
+        "extractor_args": {"youtube": {
+            "player_js_variant": ["main"],
+            "formats": ["dashy"],
+        }},
         # Let yt-dlp pick default clients (SABR branch handles SABR protocol
         # natively, so all clients including 'web' work properly now).
         "ignore_no_formats_error": True,
+        # Network resilience
+        "retries": 10,
+        "fragment_retries": 10,
+        "socket_timeout": 30,
+        # Note: concurrent fragment workers don't check for cancellation
+        # between fragments — this is a yt-dlp limitation.  Cancellation
+        # takes effect after the current batch of fragments finishes.
+        "concurrent_fragment_downloads": 8,
+        # Auto-detect throttling: if speed drops below 100 KB/s for 3s,
+        # re-extract fresh CDN URLs to bypass YouTube rate limits.
+        "throttledratelimit": 100_000,
     }
     # Only configure Deno JS runtime when the binary is present (SABR-fork feature)
     if deno_path:
         opts["js_runtimes"] = {"deno": {"path": deno_path}}
     if not is_audio:
         opts["merge_output_format"] = "mp4"
+        # Move the MOOV atom (seek index) to the start of the MP4 file.
+        # Without this, DASH fragment downloads place it at the end,
+        # making seeking impossible in long videos — the player restarts
+        # from the beginning instead of jumping to the requested time.
+        opts["postprocessor_args"] = {"merger": ["-movflags", "+faststart"]}
 
     # Subtitles
     if subtitles:
@@ -143,17 +184,6 @@ def get_ydl_version() -> str:
     return str(getattr(yt_dlp, "__version__", "unknown"))
 
 
-def extract_info_only(url: str, **ydl_kwargs: Any) -> dict[str, Any]:
-    """Fetch video/playlist metadata without downloading.
-
-    Accepts the same keyword arguments as build_ydl_opts.
-    """
-    opts = build_ydl_opts(quiet=True, **ydl_kwargs)
-    with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
-        raw = ydl.extract_info(url, download=False)
-        return dict(raw) if raw else {}
-
-
 def download_video(url: str, output_dir: str = "downloads") -> None:
     """Download a YouTube video to *output_dir*."""
     os.makedirs(output_dir, exist_ok=True)
@@ -176,7 +206,11 @@ def download_video(url: str, output_dir: str = "downloads") -> None:
         print(f"Duration : {mins}m {secs}s")
         print(f"Saving to: {os.path.abspath(output_dir)}\n")
 
-        ydl.process_ie_result(raw_info, download=True)  # reuse extracted info, skip 2nd fetch
+        # Use download([url]) instead of process_ie_result():
+        # extract_info(download=False) returns an already-processed result;
+        # calling process_ie_result() on it double-processes and silently
+        # fails for playlists.
+        ydl.download([url])
 
     print("\nDownload complete!")
 
@@ -193,10 +227,6 @@ def _cli_progress_hook(d: dict[str, Any]) -> None:
         print(f"\r  {percent}  |  Speed: {speed}  |  ETA: {eta}   ", end="", flush=True)
     elif d["status"] == "finished":
         print(f"\r  Merging / post-processing...                        ", end="", flush=True)
-
-
-# Keep legacy name so existing gui.py references don't break during transition
-progress_hook = _cli_progress_hook
 
 
 def main() -> None:
