@@ -13,7 +13,15 @@ from yt_dlp.utils import DownloadError
 
 # Firefox first: Chrome triggers noisy DPAPI errors on Windows even when it
 # ultimately falls back.  Putting Firefox first avoids those spurious ERRORs.
-_BROWSERS: list[str] = ["firefox", "chrome", "edge", "brave", "opera", "chromium", "vivaldi"]
+_BROWSERS: list[str] = [
+    "firefox",
+    "chrome",
+    "edge",
+    "brave",
+    "opera",
+    "chromium",
+    "vivaldi",
+]
 
 _YT_URL_RE = re.compile(
     r"^https?://"
@@ -39,9 +47,11 @@ def _find_deno() -> str | None:
             return winget_shim
     return None
 
+
 # ---------------------------------------------------------------------------
 # Public helpers — importable by gui.py
 # ---------------------------------------------------------------------------
+
 
 def is_valid_url(url: str) -> bool:
     """Return True if *url* looks like a YouTube video link."""
@@ -59,7 +69,9 @@ def get_cookies_browser() -> str | None:
         return _cookies_browser_cache
     for browser in _BROWSERS:
         try:
-            with yt_dlp.YoutubeDL({"cookiesfrombrowser": (browser,), "quiet": True, "no_warnings": True}) as ydl:
+            with yt_dlp.YoutubeDL(
+                {"cookiesfrombrowser": (browser,), "quiet": True, "no_warnings": True}
+            ) as ydl:
                 ydl.cookiejar  # triggers cookie load
             _cookies_browser_cache = browser
             _cookies_browser_checked = True
@@ -78,11 +90,11 @@ _cookies_browser_checked: bool = False
 # Format presets — maps user-friendly names to yt-dlp format strings
 # ---------------------------------------------------------------------------
 FORMAT_PRESETS: dict[str, str] = {
-    "best":    "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-    "1080p":   "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
-    "720p":    "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
-    "480p":    "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
-    "audio":   "bestaudio[ext=m4a]/bestaudio",
+    "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+    "1080p": "bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[height<=1080][ext=mp4]/best",
+    "720p": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best",
+    "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
+    "audio": "bestaudio[ext=m4a]/bestaudio",
 }
 
 
@@ -108,16 +120,20 @@ def build_ydl_opts(
         "format": fmt,
         "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
         "noplaylist": not playlist,
-        "progress_hooks": progress_hooks if progress_hooks is not None else [_cli_progress_hook],
+        "progress_hooks": progress_hooks
+        if progress_hooks is not None
+        else [_cli_progress_hook],
         # Force the "main" player JS variant so the challenge solver can parse it.
         # The "tv" variant (tv-player-ias.js) currently breaks the solver.
         # Request DASH fragments ("dashy") so concurrent_fragment_downloads
         # actually works — without this, YouTube serves single HTTPS streams
         # where only sequential download is possible.
-        "extractor_args": {"youtube": {
-            "player_js_variant": ["main"],
-            "formats": ["dashy"],
-        }},
+        "extractor_args": {
+            "youtube": {
+                "player_js_variant": ["main"],
+                "formats": ["dashy"],
+            }
+        },
         # Let yt-dlp pick default clients (SABR branch handles SABR protocol
         # natively, so all clients including 'web' work properly now).
         "ignore_no_formats_error": True,
@@ -154,18 +170,22 @@ def build_ydl_opts(
     # SponsorBlock must run BEFORE FFmpegExtractAudio so chapters exist in the video stream
     if sponsorblock:
         opts.setdefault("postprocessors", []).append({"key": "SponsorBlock"})
-        opts.setdefault("postprocessors", []).append({
-            "key": "ModifyChapters",
-            "remove_sponsor_segments": ["sponsor", "selfpromo", "interaction"],
-        })
+        opts.setdefault("postprocessors", []).append(
+            {
+                "key": "ModifyChapters",
+                "remove_sponsor_segments": ["sponsor", "selfpromo", "interaction"],
+            }
+        )
 
     # Audio-only: FFmpegExtractAudio must be LAST postprocessor
     if is_audio:
-        opts.setdefault("postprocessors", []).append({
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        })
+        opts.setdefault("postprocessors", []).append(
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        )
 
     if quiet:
         opts["quiet"] = True
@@ -178,6 +198,7 @@ def build_ydl_opts(
 # ---------------------------------------------------------------------------
 # Core download logic
 # ---------------------------------------------------------------------------
+
 
 def get_ydl_version() -> str:
     """Return the installed yt-dlp version string."""
@@ -219,14 +240,19 @@ def download_video(url: str, output_dir: str = "downloads") -> None:
 # CLI helpers
 # ---------------------------------------------------------------------------
 
+
 def _cli_progress_hook(d: dict[str, Any]) -> None:
     if d["status"] == "downloading":
         percent: str = str(d.get("_percent_str", "?%")).strip()
-        speed: str   = str(d.get("_speed_str",   "?")).strip()
-        eta: str     = str(d.get("_eta_str",      "?")).strip()
+        speed: str = str(d.get("_speed_str", "?")).strip()
+        eta: str = str(d.get("_eta_str", "?")).strip()
         print(f"\r  {percent}  |  Speed: {speed}  |  ETA: {eta}   ", end="", flush=True)
     elif d["status"] == "finished":
-        print(f"\r  Merging / post-processing...                        ", end="", flush=True)
+        print(
+            f"\r  Merging / post-processing...                        ",
+            end="",
+            flush=True,
+        )
 
 
 def main() -> None:
@@ -247,7 +273,9 @@ def main() -> None:
         print("Error: That doesn't look like a YouTube URL.")
         sys.exit(1)
 
-    output_dir = input("Save folder [press Enter for 'downloads']: ").strip() or "downloads"
+    output_dir = (
+        input("Save folder [press Enter for 'downloads']: ").strip() or "downloads"
+    )
 
     try:
         download_video(url, output_dir)

@@ -27,6 +27,7 @@ from config import load_config, save_config, DATA_DIR, atomic_write_json
 _has_pil = False
 try:
     from PIL import Image, ImageTk  # type: ignore[import-untyped]
+
     _has_pil = True
 except ImportError:
     pass
@@ -38,18 +39,19 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-BG          = "#0d1117"
-BG_CARD     = "#161b22"
-BG_INPUT    = "#21262d"
-ACCENT      = "#e94560"
+BG = "#0d1117"
+BG_CARD = "#161b22"
+BG_INPUT = "#21262d"
+ACCENT = "#e94560"
 ACCENT_DARK = "#c73652"
 ACCENT_GLOW = "#ff6b84"
 TXT_PRIMARY = "#f0f6fc"
-TXT_MUTED   = "#8b949e"
+TXT_MUTED = "#8b949e"
 TXT_SUCCESS = "#3fb950"
-TXT_ERROR   = "#f85149"
-TXT_WARN    = "#d29922"
-BORDER      = "#30363d"
+TXT_ERROR = "#f85149"
+TXT_WARN = "#d29922"
+BORDER = "#30363d"
+
 
 def _ui_font() -> str:
     """Return a platform-appropriate sans-serif font family."""
@@ -59,33 +61,37 @@ def _ui_font() -> str:
         return "Helvetica Neue"
     return "sans-serif"
 
+
 _FONT = _ui_font()
-FONT_TITLE  = (_FONT, 20, "bold")
-FONT_SUB    = (_FONT, 11)
-FONT_LABEL  = (_FONT, 11, "bold")
-FONT_INPUT  = (_FONT, 12)
-FONT_BTN    = (_FONT, 12, "bold")
-FONT_SMALL  = (_FONT, 10)
-FONT_HIST   = (_FONT, 10)
+FONT_TITLE = (_FONT, 20, "bold")
+FONT_SUB = (_FONT, 11)
+FONT_LABEL = (_FONT, 11, "bold")
+FONT_INPUT = (_FONT, 12)
+FONT_BTN = (_FONT, 12, "bold")
+FONT_SMALL = (_FONT, 10)
+FONT_HIST = (_FONT, 10)
 
 HISTORY_FILE = os.path.join(DATA_DIR, ".yt_history.json")
 
 # Migrate from legacy location (next to source) if different
-_LEGACY_HISTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yt_history.json")
+_LEGACY_HISTORY = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), ".yt_history.json"
+)
 if DATA_DIR != os.path.dirname(os.path.abspath(__file__)):
     if os.path.exists(_LEGACY_HISTORY) and not os.path.exists(HISTORY_FILE):
         try:
             import shutil as _shutil
+
             _shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
         except OSError:
             pass
 
 FORMAT_LABELS: dict[str, str] = {
-    "Best Quality":      "best",
-    "1080p":             "1080p",
-    "720p":              "720p",
-    "480p":              "480p",
-    "Audio Only (MP3)":  "audio",
+    "Best Quality": "best",
+    "1080p": "1080p",
+    "720p": "720p",
+    "480p": "480p",
+    "Audio Only (MP3)": "audio",
 }
 _LABEL_BY_KEY: dict[str, str] = {v: k for k, v in FORMAT_LABELS.items()}
 
@@ -163,7 +169,14 @@ class App(tk.Tk):
         self._populate_from_config()
         self._center()
 
-        self.bind("<Return>", lambda e: None if isinstance(e.widget, (tk.Text, tk.Entry, ttk.Entry, ttk.Combobox)) else self._start_download())
+        self.bind(
+            "<Return>",
+            lambda e: (
+                None
+                if isinstance(e.widget, (tk.Text, tk.Entry, ttk.Entry, ttk.Combobox))
+                else self._start_download()
+            ),
+        )
         self.protocol("WM_DELETE_WINDOW", self._on_closing)
         threading.Thread(target=self._fetch_version, daemon=True).start()
 
@@ -212,44 +225,71 @@ class App(tk.Tk):
 
         title_col = tk.Frame(hdr, bg=BG)
         title_col.pack(side="left")
-        tk.Label(title_col, text="YouTube Downloader", bg=BG, fg=TXT_PRIMARY,
-                 font=FONT_TITLE).pack(anchor="w")
+        tk.Label(
+            title_col, text="YouTube Downloader", bg=BG, fg=TXT_PRIMARY, font=FONT_TITLE
+        ).pack(anchor="w")
         self.subtitle_var = tk.StringVar(
             value="Paste a URL, press Enter or click Download"
         )
-        tk.Label(title_col, textvariable=self.subtitle_var,
-                 bg=BG, fg=TXT_MUTED, font=FONT_SUB).pack(anchor="w")
+        tk.Label(
+            title_col,
+            textvariable=self.subtitle_var,
+            bg=BG,
+            fg=TXT_MUTED,
+            font=FONT_SUB,
+        ).pack(anchor="w")
 
         # ── URL card (multi-line Text) ────────────────────────────────
         outer, card = _make_card(self)
         outer.pack(fill="x", padx=PAD, pady=(10, 0))
 
-        tk.Label(card, text="YouTube URL(s) \u2014 one per line", bg=BG_CARD,
-                 fg=TXT_MUTED, font=FONT_LABEL).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(
+            card,
+            text="YouTube URL(s) \u2014 one per line",
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            font=FONT_LABEL,
+        ).pack(anchor="w", padx=14, pady=(12, 2))
 
         url_row = tk.Frame(card, bg=BG_CARD)
         url_row.pack(fill="x", padx=14, pady=(0, 12))
 
         self.url_text = tk.Text(
-            url_row, bg=BG_INPUT, fg=TXT_PRIMARY, insertbackground=TXT_PRIMARY,
-            relief="flat", font=FONT_INPUT, bd=0, height=3, wrap="word", undo=True,
+            url_row,
+            bg=BG_INPUT,
+            fg=TXT_PRIMARY,
+            insertbackground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_INPUT,
+            bd=0,
+            height=3,
+            wrap="word",
+            undo=True,
         )
         self.url_text.pack(side="left", fill="x", expand=True, ipady=4, padx=(0, 8))
         self.url_text.bind("<FocusIn>", self._auto_paste)
 
         tk.Button(
-            url_row, text="Paste", bg=BG_INPUT, fg=TXT_MUTED,
-            activebackground=BORDER, activeforeground=TXT_PRIMARY,
-            relief="flat", font=FONT_SMALL, cursor="hand2",
-            command=self._paste_url, padx=10,
+            url_row,
+            text="Paste",
+            bg=BG_INPUT,
+            fg=TXT_MUTED,
+            activebackground=BORDER,
+            activeforeground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_SMALL,
+            cursor="hand2",
+            command=self._paste_url,
+            padx=10,
         ).pack(side="left", ipady=8, anchor="n")
 
         # ── Save folder card ──────────────────────────────────────────
         outer2, card2 = _make_card(self)
         outer2.pack(fill="x", padx=PAD, pady=(10, 0))
 
-        tk.Label(card2, text="Save Folder", bg=BG_CARD, fg=TXT_MUTED,
-                 font=FONT_LABEL).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(
+            card2, text="Save Folder", bg=BG_CARD, fg=TXT_MUTED, font=FONT_LABEL
+        ).pack(anchor="w", padx=14, pady=(12, 2))
 
         dir_row = tk.Frame(card2, bg=BG_CARD)
         dir_row.pack(fill="x", padx=14, pady=(0, 12))
@@ -258,24 +298,37 @@ class App(tk.Tk):
             value=os.path.join(os.path.expanduser("~"), "Downloads", "YouTube")
         )
         tk.Entry(
-            dir_row, textvariable=self.dir_var,
-            bg=BG_INPUT, fg=TXT_PRIMARY, insertbackground=TXT_PRIMARY,
-            relief="flat", font=FONT_INPUT, bd=0,
+            dir_row,
+            textvariable=self.dir_var,
+            bg=BG_INPUT,
+            fg=TXT_PRIMARY,
+            insertbackground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_INPUT,
+            bd=0,
         ).pack(side="left", fill="x", expand=True, ipady=7, padx=(0, 8))
 
         tk.Button(
-            dir_row, text="Browse", bg=BG_INPUT, fg=TXT_MUTED,
-            activebackground=BORDER, activeforeground=TXT_PRIMARY,
-            relief="flat", font=FONT_SMALL, cursor="hand2",
-            command=self._browse_folder, padx=10,
+            dir_row,
+            text="Browse",
+            bg=BG_INPUT,
+            fg=TXT_MUTED,
+            activebackground=BORDER,
+            activeforeground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_SMALL,
+            cursor="hand2",
+            command=self._browse_folder,
+            padx=10,
         ).pack(side="left", ipady=7)
 
         # ── Options card ──────────────────────────────────────────────
         outer_opt, card_opt = _make_card(self)
         outer_opt.pack(fill="x", padx=PAD, pady=(10, 0))
 
-        tk.Label(card_opt, text="Options", bg=BG_CARD, fg=TXT_MUTED,
-                 font=FONT_LABEL).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(
+            card_opt, text="Options", bg=BG_CARD, fg=TXT_MUTED, font=FONT_LABEL
+        ).pack(anchor="w", padx=14, pady=(12, 2))
 
         opts_inner = tk.Frame(card_opt, bg=BG_CARD)
         opts_inner.pack(fill="x", padx=14, pady=(0, 12))
@@ -284,14 +337,18 @@ class App(tk.Tk):
         fmt_row = tk.Frame(opts_inner, bg=BG_CARD)
         fmt_row.pack(fill="x", pady=(0, 6))
 
-        tk.Label(fmt_row, text="Format:", bg=BG_CARD, fg=TXT_MUTED,
-                 font=FONT_SMALL).pack(side="left", padx=(0, 8))
+        tk.Label(
+            fmt_row, text="Format:", bg=BG_CARD, fg=TXT_MUTED, font=FONT_SMALL
+        ).pack(side="left", padx=(0, 8))
 
         self.format_var = tk.StringVar(value="Best Quality")
         self.format_combo = ttk.Combobox(
-            fmt_row, textvariable=self.format_var,
+            fmt_row,
+            textvariable=self.format_var,
             values=list(FORMAT_LABELS.keys()),
-            state="readonly", width=20, style="Dark.TCombobox",
+            state="readonly",
+            width=20,
+            style="Dark.TCombobox",
         )
         self.format_combo.pack(side="left")
 
@@ -301,26 +358,41 @@ class App(tk.Tk):
 
         self.sub_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            chk_row, text="Download Subtitles (en, ar)",
-            variable=self.sub_var, bg=BG_CARD, fg=TXT_MUTED,
-            selectcolor=BG_INPUT, activebackground=BG_CARD,
-            activeforeground=TXT_PRIMARY, font=FONT_SMALL,
+            chk_row,
+            text="Download Subtitles (en, ar)",
+            variable=self.sub_var,
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            selectcolor=BG_INPUT,
+            activebackground=BG_CARD,
+            activeforeground=TXT_PRIMARY,
+            font=FONT_SMALL,
         ).pack(side="left", padx=(0, 16))
 
         self.sponsor_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            chk_row, text="Remove Sponsors (SponsorBlock)",
-            variable=self.sponsor_var, bg=BG_CARD, fg=TXT_MUTED,
-            selectcolor=BG_INPUT, activebackground=BG_CARD,
-            activeforeground=TXT_PRIMARY, font=FONT_SMALL,
+            chk_row,
+            text="Remove Sponsors (SponsorBlock)",
+            variable=self.sponsor_var,
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            selectcolor=BG_INPUT,
+            activebackground=BG_CARD,
+            activeforeground=TXT_PRIMARY,
+            font=FONT_SMALL,
         ).pack(side="left", padx=(0, 16))
 
         self.playlist_var = tk.BooleanVar(value=False)
         tk.Checkbutton(
-            chk_row, text="Download Playlist",
-            variable=self.playlist_var, bg=BG_CARD, fg=TXT_MUTED,
-            selectcolor=BG_INPUT, activebackground=BG_CARD,
-            activeforeground=TXT_PRIMARY, font=FONT_SMALL,
+            chk_row,
+            text="Download Playlist",
+            variable=self.playlist_var,
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            selectcolor=BG_INPUT,
+            activebackground=BG_CARD,
+            activeforeground=TXT_PRIMARY,
+            font=FONT_SMALL,
         ).pack(side="left")
 
         # ── Thumbnail preview (hidden initially) ──────────────────────
@@ -328,14 +400,20 @@ class App(tk.Tk):
         self.thumb_label = tk.Label(self.thumb_frame, bg=BG)
         self.thumb_label.pack(side="left", padx=(0, 12))
         self.thumb_title_lbl = tk.Label(
-            self.thumb_frame, bg=BG, fg=TXT_PRIMARY, font=FONT_SMALL,
-            wraplength=350, anchor="w", justify="left",
+            self.thumb_frame,
+            bg=BG,
+            fg=TXT_PRIMARY,
+            font=FONT_SMALL,
+            wraplength=350,
+            anchor="w",
+            justify="left",
         )
         self.thumb_title_lbl.pack(side="left", fill="x", expand=True, anchor="w")
 
         # ── Progress bar ──────────────────────────────────────────────
         self.progress = ttk.Progressbar(
-            self, style="Accent.Horizontal.TProgressbar",
+            self,
+            style="Accent.Horizontal.TProgressbar",
             mode="indeterminate",
         )
         self.progress.pack(fill="x", padx=PAD, pady=(14, 0))
@@ -343,22 +421,35 @@ class App(tk.Tk):
         # ── Speed / ETA row (hidden initially) ────────────────────────
         self.speed_eta_frame = tk.Frame(self, bg=BG)
         self.speed_lbl = tk.Label(
-            self.speed_eta_frame, text="", bg=BG, fg=TXT_MUTED,
-            font=FONT_SMALL, anchor="w",
+            self.speed_eta_frame,
+            text="",
+            bg=BG,
+            fg=TXT_MUTED,
+            font=FONT_SMALL,
+            anchor="w",
         )
         self.speed_lbl.pack(side="left")
         self.eta_lbl = tk.Label(
-            self.speed_eta_frame, text="", bg=BG, fg=TXT_MUTED,
-            font=FONT_SMALL, anchor="e",
+            self.speed_eta_frame,
+            text="",
+            bg=BG,
+            fg=TXT_MUTED,
+            font=FONT_SMALL,
+            anchor="e",
         )
         self.eta_lbl.pack(side="right")
 
         # ── Status label ──────────────────────────────────────────────
         self.status_var = tk.StringVar(value="Ready \u2014 paste a URL above")
         self.status_lbl = tk.Label(
-            self, textvariable=self.status_var,
-            bg=BG, fg=TXT_MUTED, font=FONT_SMALL,
-            wraplength=580, anchor="w", justify="left",
+            self,
+            textvariable=self.status_var,
+            bg=BG,
+            fg=TXT_MUTED,
+            font=FONT_SMALL,
+            wraplength=580,
+            anchor="w",
+            justify="left",
         )
         self.status_lbl.pack(fill="x", padx=PAD, pady=(6, 0))
 
@@ -367,10 +458,16 @@ class App(tk.Tk):
         btn_row.pack(fill="x", padx=PAD, pady=(12, 0))
 
         self.btn = tk.Button(
-            btn_row, text="Download",
-            bg=ACCENT, fg="white",
-            activebackground=ACCENT_DARK, activeforeground="white",
-            relief="flat", font=FONT_BTN, cursor="hand2", bd=0,
+            btn_row,
+            text="Download",
+            bg=ACCENT,
+            fg="white",
+            activebackground=ACCENT_DARK,
+            activeforeground="white",
+            relief="flat",
+            font=FONT_BTN,
+            cursor="hand2",
+            bd=0,
             command=self._start_download,
         )
         self.btn.pack(side="left", ipadx=24, ipady=10)
@@ -378,59 +475,100 @@ class App(tk.Tk):
         self.btn.bind("<Leave>", lambda e: self.btn.config(bg=ACCENT))
 
         self.open_btn = tk.Button(
-            btn_row, text="Open Folder",
-            bg=BG_CARD, fg=TXT_MUTED,
-            activebackground=BORDER, activeforeground=TXT_PRIMARY,
-            relief="flat", font=FONT_BTN, cursor="hand2", bd=0,
+            btn_row,
+            text="Open Folder",
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            activebackground=BORDER,
+            activeforeground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_BTN,
+            cursor="hand2",
+            bd=0,
             command=self._open_folder,
         )
 
         self.copy_title_btn = tk.Button(
-            btn_row, text="Copy Title",
-            bg=BG_CARD, fg=TXT_MUTED,
-            activebackground=BORDER, activeforeground=TXT_PRIMARY,
-            relief="flat", font=FONT_BTN, cursor="hand2", bd=0,
+            btn_row,
+            text="Copy Title",
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            activebackground=BORDER,
+            activeforeground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_BTN,
+            cursor="hand2",
+            bd=0,
             command=self._copy_title,
         )
 
         self.cancel_btn = tk.Button(
-            btn_row, text="Cancel",
-            bg=BG_CARD, fg=TXT_ERROR,
-            activebackground=BORDER, activeforeground=TXT_ERROR,
-            relief="flat", font=FONT_BTN, cursor="hand2", bd=0,
+            btn_row,
+            text="Cancel",
+            bg=BG_CARD,
+            fg=TXT_ERROR,
+            activebackground=BORDER,
+            activeforeground=TXT_ERROR,
+            relief="flat",
+            font=FONT_BTN,
+            cursor="hand2",
+            bd=0,
             command=self._cancel_download,
         )
 
         # ── History panel ─────────────────────────────────────────────
         hist_hdr = tk.Frame(self, bg=BG)
         hist_hdr.pack(fill="x", padx=PAD, pady=(18, 4))
-        tk.Label(hist_hdr, text="Recent Downloads", bg=BG, fg=TXT_MUTED,
-                 font=FONT_LABEL).pack(side="left")
+        tk.Label(
+            hist_hdr, text="Recent Downloads", bg=BG, fg=TXT_MUTED, font=FONT_LABEL
+        ).pack(side="left")
 
         tk.Button(
-            hist_hdr, text="Export", bg=BG, fg=TXT_MUTED,
-            activebackground=BG, activeforeground=TXT_PRIMARY,
-            relief="flat", font=FONT_SMALL, cursor="hand2",
-            command=self._export_history, bd=0,
+            hist_hdr,
+            text="Export",
+            bg=BG,
+            fg=TXT_MUTED,
+            activebackground=BG,
+            activeforeground=TXT_PRIMARY,
+            relief="flat",
+            font=FONT_SMALL,
+            cursor="hand2",
+            command=self._export_history,
+            bd=0,
         ).pack(side="right", padx=(8, 0))
 
         tk.Button(
-            hist_hdr, text="Clear", bg=BG, fg=TXT_MUTED,
-            activebackground=BG, activeforeground=TXT_ERROR,
-            relief="flat", font=FONT_SMALL, cursor="hand2",
-            command=self._clear_history, bd=0,
+            hist_hdr,
+            text="Clear",
+            bg=BG,
+            fg=TXT_MUTED,
+            activebackground=BG,
+            activeforeground=TXT_ERROR,
+            relief="flat",
+            font=FONT_SMALL,
+            cursor="hand2",
+            command=self._clear_history,
+            bd=0,
         ).pack(side="right")
 
         outer3, card3 = _make_card(self)
         outer3.pack(fill="both", padx=PAD, pady=(0, PAD), expand=True)
 
-        scrollbar = tk.Scrollbar(card3, bg=BG_CARD, troughcolor=BG_INPUT,
-                                 relief="flat", bd=0, width=8)
+        scrollbar = tk.Scrollbar(
+            card3, bg=BG_CARD, troughcolor=BG_INPUT, relief="flat", bd=0, width=8
+        )
         self.hist_list = tk.Listbox(
-            card3, bg=BG_CARD, fg=TXT_MUTED, selectbackground=BG_INPUT,
-            selectforeground=TXT_PRIMARY, relief="flat", bd=0,
-            font=FONT_HIST, activestyle="none",
-            yscrollcommand=scrollbar.set, height=6,
+            card3,
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            selectbackground=BG_INPUT,
+            selectforeground=TXT_PRIMARY,
+            relief="flat",
+            bd=0,
+            font=FONT_HIST,
+            activestyle="none",
+            yscrollcommand=scrollbar.set,
+            height=6,
         )
         scrollbar.config(command=self.hist_list.yview)  # type: ignore[arg-type]
         self.hist_list.pack(side="left", fill="both", expand=True, padx=6, pady=6)
@@ -446,19 +584,23 @@ class App(tk.Tk):
         cfg = self._cfg
         if cfg.get("output_dir"):
             self.dir_var.set(cfg["output_dir"])
-        self.format_var.set(_LABEL_BY_KEY.get(cfg.get("format", "best"), "Best Quality"))
+        self.format_var.set(
+            _LABEL_BY_KEY.get(cfg.get("format", "best"), "Best Quality")
+        )
         self.sub_var.set(bool(cfg.get("subtitles", False)))
         self.sponsor_var.set(bool(cfg.get("sponsorblock", False)))
         self.playlist_var.set(bool(cfg.get("playlist", False)))
 
     def _save_current_config(self) -> None:
-        save_config({
-            "output_dir": self.dir_var.get().strip(),
-            "format": FORMAT_LABELS.get(self.format_var.get(), "best"),
-            "subtitles": self.sub_var.get(),
-            "sponsorblock": self.sponsor_var.get(),
-            "playlist": self.playlist_var.get(),
-        })
+        save_config(
+            {
+                "output_dir": self.dir_var.get().strip(),
+                "format": FORMAT_LABELS.get(self.format_var.get(), "best"),
+                "subtitles": self.sub_var.get(),
+                "sponsorblock": self.sponsor_var.get(),
+                "playlist": self.playlist_var.get(),
+            }
+        )
 
     # ------------------------------------------------------------------
     # Version check
@@ -488,7 +630,7 @@ class App(tk.Tk):
     def _center(self) -> None:
         self.update_idletasks()
         w, h = self.winfo_width(), self.winfo_height()
-        x = (self.winfo_screenwidth()  - w) // 2
+        x = (self.winfo_screenwidth() - w) // 2
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"+{x}+{y}")
 
@@ -508,10 +650,10 @@ class App(tk.Tk):
 
     def _set_status(self, msg: str, state: str = "idle") -> None:
         colors = {
-            "idle":    TXT_MUTED,
+            "idle": TXT_MUTED,
             "loading": TXT_WARN,
             "success": TXT_SUCCESS,
-            "error":   TXT_ERROR,
+            "error": TXT_ERROR,
         }
         self.status_var.set(msg)
         self.status_lbl.configure(fg=colors.get(state, TXT_MUTED))
@@ -534,7 +676,11 @@ class App(tk.Tk):
         try:
             text = self.clipboard_get().strip()
             # Only auto-paste lines that pass URL validation
-            valid_lines = [ln for ln in text.splitlines() if ln.strip() and is_valid_url(ln.strip())]
+            valid_lines = [
+                ln
+                for ln in text.splitlines()
+                if ln.strip() and is_valid_url(ln.strip())
+            ]
             if valid_lines:
                 self.url_text.insert("1.0", "\n".join(valid_lines))
         except Exception:
@@ -585,11 +731,11 @@ class App(tk.Tk):
             self.hist_list.itemconfig(0, fg=TXT_MUTED)  # type: ignore[call-arg]
         else:
             for item in reversed(self._history):
-                ts     = item.get("time", "")
-                title  = item.get("title", "Unknown")
+                ts = item.get("time", "")
+                title = item.get("title", "Unknown")
                 status = item.get("status", "success")
                 prefix = "\u2713 " if status == "success" else "\u2717 "
-                color  = TXT_SUCCESS if status == "success" else TXT_ERROR
+                color = TXT_SUCCESS if status == "success" else TXT_ERROR
                 idx = self.hist_list.size()
                 self.hist_list.insert("end", f"  {prefix}{ts}   {title}")
                 self.hist_list.itemconfig(idx, fg=color)  # type: ignore[call-arg]
@@ -619,12 +765,14 @@ class App(tk.Tk):
             writer = csv.writer(f)
             writer.writerow(["time", "title", "path", "status"])
             for item in self._history:
-                writer.writerow([
-                    item.get("time", ""),
-                    item.get("title", ""),
-                    item.get("path", ""),
-                    item.get("status", "success"),
-                ])
+                writer.writerow(
+                    [
+                        item.get("time", ""),
+                        item.get("title", ""),
+                        item.get("path", ""),
+                        item.get("status", "success"),
+                    ]
+                )
         self._set_status(f"History exported to {os.path.basename(path)}", "success")
 
     # ------------------------------------------------------------------
@@ -642,8 +790,7 @@ class App(tk.Tk):
             self._thumb_photo = ImageTk.PhotoImage(img)  # type: ignore[possibly-undefined]
             self.thumb_label.configure(image=self._thumb_photo)
             self.thumb_title_lbl.configure(text=title)
-            self.thumb_frame.pack(fill="x", padx=20, pady=(10, 0),
-                                  before=self.progress)
+            self.thumb_frame.pack(fill="x", padx=20, pady=(10, 0), before=self.progress)
         except Exception:
             pass
 
@@ -655,8 +802,7 @@ class App(tk.Tk):
     # Speed / ETA helpers
     # ------------------------------------------------------------------
     def _show_speed_eta(self) -> None:
-        self.speed_eta_frame.pack(fill="x", padx=20, pady=(4, 0),
-                                  after=self.progress)
+        self.speed_eta_frame.pack(fill="x", padx=20, pady=(4, 0), after=self.progress)
 
     def _hide_speed_eta(self) -> None:
         self.speed_eta_frame.pack_forget()
@@ -679,16 +825,16 @@ class App(tk.Tk):
                 self.progress["value"] = pct
 
             speed = str(d.get("_speed_str", "")).strip()
-            eta   = str(d.get("_eta_str",   "")).strip()
+            eta = str(d.get("_eta_str", "")).strip()
             if speed:
                 self.speed_lbl.configure(text=speed)
             if eta:
                 self.eta_lbl.configure(text=f"ETA {eta}")
 
             info: dict[str, Any] = d.get("info_dict") or {}
-            pl_idx: Any    = info.get("playlist_index") or info.get("playlist_autonumber")
+            pl_idx: Any = info.get("playlist_index") or info.get("playlist_autonumber")
             n_entries: Any = info.get("n_entries") or info.get("playlist_count")
-            pct_str   = str(d.get("_percent_str", "")).strip()
+            pct_str = str(d.get("_percent_str", "")).strip()
 
             parts: list[str] = []
             if self._queue_total > 1:
@@ -740,10 +886,10 @@ class App(tk.Tk):
         output_dir = self.dir_var.get().strip() or os.path.join(
             os.path.expanduser("~"), "Downloads", "YouTube"
         )
-        format_key   = FORMAT_LABELS.get(self.format_var.get(), "best")
-        subtitles    = self.sub_var.get()
+        format_key = FORMAT_LABELS.get(self.format_var.get(), "best")
+        subtitles = self.sub_var.get()
         sponsorblock = self.sponsor_var.get()
-        playlist     = self.playlist_var.get()
+        playlist = self.playlist_var.get()
 
         # UI state
         self.btn.configure(state="disabled", bg="#444455")
@@ -765,15 +911,21 @@ class App(tk.Tk):
         self._cancel_event.set()
         self._set_status("Cancelling\u2026", "idle")
 
-    def _download_thread(self, urls: list[str], output_dir: str,
-                         format_key: str, subtitles: bool,
-                         sponsorblock: bool, playlist: bool) -> None:
+    def _download_thread(
+        self,
+        urls: list[str],
+        output_dir: str,
+        format_key: str,
+        subtitles: bool,
+        sponsorblock: bool,
+        playlist: bool,
+    ) -> None:
         try:
             os.makedirs(output_dir, exist_ok=True)
 
             success_count = 0
-            error_count   = 0
-            last_title    = "Unknown"
+            error_count = 0
+            last_title = "Unknown"
 
             _last_hook_time = 0.0
             _current_queue_idx = 0
@@ -791,19 +943,19 @@ class App(tk.Tk):
                 # large, mutable info_dict that yt-dlp may recycle.
                 info: dict[str, Any] = d.get("info_dict") or {}
                 snap: dict[str, Any] = {
-                    "status":               d.get("status"),
-                    "total_bytes":          d.get("total_bytes"),
+                    "status": d.get("status"),
+                    "total_bytes": d.get("total_bytes"),
                     "total_bytes_estimate": d.get("total_bytes_estimate"),
-                    "downloaded_bytes":     d.get("downloaded_bytes", 0),
-                    "_speed_str":           _ANSI_RE.sub("", str(d.get("_speed_str", ""))),
-                    "_eta_str":             _ANSI_RE.sub("", str(d.get("_eta_str", ""))),
-                    "_percent_str":         _ANSI_RE.sub("", str(d.get("_percent_str", ""))),
-                    "_queue_index":         _current_queue_idx,
+                    "downloaded_bytes": d.get("downloaded_bytes", 0),
+                    "_speed_str": _ANSI_RE.sub("", str(d.get("_speed_str", ""))),
+                    "_eta_str": _ANSI_RE.sub("", str(d.get("_eta_str", ""))),
+                    "_percent_str": _ANSI_RE.sub("", str(d.get("_percent_str", ""))),
+                    "_queue_index": _current_queue_idx,
                     "info_dict": {
-                        "playlist_index":      info.get("playlist_index"),
+                        "playlist_index": info.get("playlist_index"),
                         "playlist_autonumber": info.get("playlist_autonumber"),
-                        "n_entries":           info.get("n_entries"),
-                        "playlist_count":      info.get("playlist_count"),
+                        "n_entries": info.get("n_entries"),
+                        "playlist_count": info.get("playlist_count"),
                     },
                 }
                 self._safe_after(0, self._update_progress, snap)
@@ -816,12 +968,16 @@ class App(tk.Tk):
                 self._safe_after(0, self._reset_progress_for_url)
 
                 if self._queue_total > 1:
-                    self._safe_after(0, self._set_status,
-                                     f"Fetching info \u2014 URL {i} / {len(urls)}\u2026",
-                                     "loading")
+                    self._safe_after(
+                        0,
+                        self._set_status,
+                        f"Fetching info \u2014 URL {i} / {len(urls)}\u2026",
+                        "loading",
+                    )
                 else:
-                    self._safe_after(0, self._set_status,
-                                     "Fetching info\u2026", "loading")
+                    self._safe_after(
+                        0, self._set_status, "Fetching info\u2026", "loading"
+                    )
 
                 try:
                     opts = build_ydl_opts(
@@ -845,11 +1001,14 @@ class App(tk.Tk):
                         # Fetch thumbnail in this thread (I/O), display on main thread
                         if thumb_url and _has_pil and _is_safe_url(thumb_url):
                             try:
-                                req = Request(thumb_url,
-                                              headers={"User-Agent": "Mozilla/5.0"})
+                                req = Request(
+                                    thumb_url, headers={"User-Agent": "Mozilla/5.0"}
+                                )
                                 with urlopen(req, timeout=10) as resp:
                                     thumb_data = resp.read(_MAX_THUMB_BYTES)
-                                self._safe_after(0, self._display_thumbnail, thumb_data, title)
+                                self._safe_after(
+                                    0, self._display_thumbnail, thumb_data, title
+                                )
                             except Exception:
                                 pass
 
@@ -858,7 +1017,9 @@ class App(tk.Tk):
                         if not info.get("requested_formats") and not info.get("url"):
                             fmt_list = info.get("formats")
                             if not fmt_list:
-                                raise DownloadError(f"No downloadable formats for: {title}")
+                                raise DownloadError(
+                                    f"No downloadable formats for: {title}"
+                                )
 
                         # Use download([url]) instead of process_ie_result():
                         # extract_info(download=False) returns an already-processed
@@ -875,28 +1036,38 @@ class App(tk.Tk):
                         return
                     error_count += 1
                     err_msg = _ANSI_RE.sub("", str(e))[:120]
-                    self._safe_after(0, self._add_history,
-                                     f"Failed: {err_msg}", output_dir, "error")
+                    self._safe_after(
+                        0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
+                    )
                 except Exception as e:
                     if self._cancel_event.is_set():
                         self._safe_after(0, self._on_error, "Cancelled by user")
                         return
                     error_count += 1
                     err_msg = _ANSI_RE.sub("", str(e))[:120]
-                    self._safe_after(0, self._add_history,
-                                     f"Failed: {err_msg}", output_dir, "error")
+                    self._safe_after(
+                        0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
+                    )
 
             # All URLs processed — check cancel first to avoid false success
             if self._cancel_event.is_set():
                 self._safe_after(0, self._on_error, "Cancelled by user")
             elif error_count == 0:
-                self._safe_after(0, self._on_success, output_dir, last_title, success_count)
+                self._safe_after(
+                    0, self._on_success, output_dir, last_title, success_count
+                )
             elif success_count > 0:
-                self._safe_after(0, self._on_partial, output_dir, last_title,
-                                 f"{success_count} succeeded, {error_count} failed")
+                self._safe_after(
+                    0,
+                    self._on_partial,
+                    output_dir,
+                    last_title,
+                    f"{success_count} succeeded, {error_count} failed",
+                )
             else:
-                self._safe_after(0, self._on_error,
-                                 f"All {error_count} download(s) failed")
+                self._safe_after(
+                    0, self._on_error, f"All {error_count} download(s) failed"
+                )
         except Exception:
             self._safe_after(0, self._on_error, "Unexpected error occurred")
         finally:
@@ -906,12 +1077,14 @@ class App(tk.Tk):
     # Result handlers
     # ------------------------------------------------------------------
     def _add_history(self, title: str, path: str, status: str) -> None:
-        self._history.append({
-            "time":   datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "title":  title,
-            "path":   path,
-            "status": status,
-        })
+        self._history.append(
+            {
+                "time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "title": title,
+                "path": path,
+                "status": status,
+            }
+        )
         if len(self._history) > 50:
             self._history = self._history[-50:]
         save_history(self._history)
