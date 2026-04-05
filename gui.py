@@ -3,6 +3,8 @@ import sys
 import os
 import csv
 import io
+import ipaddress
+import shutil
 import json
 import time
 import threading
@@ -59,7 +61,7 @@ def _ui_font() -> str:
         return "Segoe UI"
     if sys.platform == "darwin":
         return "Helvetica Neue"
-    return "sans-serif"
+    return "Helvetica"
 
 
 _FONT = _ui_font()
@@ -80,9 +82,7 @@ _LEGACY_HISTORY = os.path.join(
 if DATA_DIR != os.path.dirname(os.path.abspath(__file__)):
     if os.path.exists(_LEGACY_HISTORY) and not os.path.exists(HISTORY_FILE):
         try:
-            import shutil as _shutil
-
-            _shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
+            shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
         except OSError:
             pass
 
@@ -106,8 +106,21 @@ def _is_safe_url(url: str) -> bool:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             return False
-        if parsed.hostname in _UNSAFE_HOSTS:
+        hostname = parsed.hostname or ""
+        if hostname in _UNSAFE_HOSTS:
             return False
+        # Check for private/reserved IP ranges (SSRF protection)
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if (
+                addr.is_private
+                or addr.is_loopback
+                or addr.is_reserved
+                or addr.is_link_local
+            ):
+                return False
+        except ValueError:
+            pass  # Not an IP literal — hostname is fine
         return True
     except Exception:
         return False
@@ -116,23 +129,36 @@ def _is_safe_url(url: str) -> bool:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+_HISTORY_KEYS = {"time", "title", "path", "status"}
+
+
 def load_history() -> list[dict[str, str]]:
     if os.path.exists(HISTORY_FILE):
         try:
             with open(HISTORY_FILE, encoding="utf-8") as f:
-                data = json.load(f)
+                data: Any = json.load(f)
             if isinstance(data, list):
-                return [e for e in data if isinstance(e, dict)]  # type: ignore[reportUnknownVariableType]
+                result: list[dict[str, str]] = []
+                for entry in data:  # pyright: ignore[reportUnknownVariableType]
+                    if (
+                        isinstance(entry, dict)  # pyright: ignore[reportUnnecessaryIsInstance]
+                        and _HISTORY_KEYS.issubset(entry.keys())  # pyright: ignore[reportUnknownArgumentType]
+                        and all(isinstance(entry[k], str) for k in _HISTORY_KEYS)
+                    ):
+                        result.append(entry)  # pyright: ignore[reportUnknownArgumentType]
+                return result
         except Exception:
             pass
     return []
 
 
-def save_history(history: list[dict[str, str]]) -> None:
+def save_history(history: list[dict[str, str]]) -> bool:
+    """Save history; return True on success, False on failure."""
     try:
         atomic_write_json(HISTORY_FILE, history[-50:])
+        return True
     except Exception:
-        pass
+        return False
 
 
 def _make_card(parent: tk.Misc) -> tuple[tk.Frame, tk.Frame]:
@@ -162,6 +188,7 @@ class App(tk.Tk):
         self._queue_total: int = 0
         self._progress_determinate: bool = False
         self._close_retries: int = 0
+        self._child_procs: set[subprocess.Popen[bytes]] = set()
 
         self._cfg = load_config()
         self._apply_styles()
@@ -471,8 +498,22 @@ class App(tk.Tk):
             command=self._start_download,
         )
         self.btn.pack(side="left", ipadx=24, ipady=10)
-        self.btn.bind("<Enter>", lambda e: self.btn.config(bg=ACCENT_GLOW))
-        self.btn.bind("<Leave>", lambda e: self.btn.config(bg=ACCENT))
+        self.btn.bind(
+            "<Enter>",
+            lambda e: (
+                self.btn.config(bg=ACCENT_GLOW)
+                if str(self.btn["state"]) != "disabled"
+                else None
+            ),
+        )
+        self.btn.bind(
+            "<Leave>",
+            lambda e: (
+                self.btn.config(bg=ACCENT)
+                if str(self.btn["state"]) != "disabled"
+                else None
+            ),
+        )
 
         self.open_btn = tk.Button(
             btn_row,
@@ -592,7 +633,7 @@ class App(tk.Tk):
         self.playlist_var.set(bool(cfg.get("playlist", False)))
 
     def _save_current_config(self) -> None:
-        save_config(
+        ok = save_config(
             {
                 "output_dir": self.dir_var.get().strip(),
                 "format": FORMAT_LABELS.get(self.format_var.get(), "best"),
@@ -601,6 +642,8 @@ class App(tk.Tk):
                 "playlist": self.playlist_var.get(),
             }
         )
+        if not ok:
+            self._set_status("Warning: could not save settings", "error")
 
     # ------------------------------------------------------------------
     # Version check
@@ -642,6 +685,13 @@ class App(tk.Tk):
         """
         if self._download_active:
             self._cancel_event.set()
+            # Terminate tracked ffmpeg subprocesses to avoid orphans
+            for proc in list(self._child_procs):
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            self._child_procs.clear()
             self._close_retries += 1
             if self._close_retries < 25:
                 self.after(200, self._on_closing)
@@ -721,7 +771,8 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     def _clear_history(self) -> None:
         self._history.clear()
-        save_history(self._history)
+        if not save_history(self._history):
+            self._set_status("Warning: could not save history", "error")
         self._refresh_history_ui()
 
     def _refresh_history_ui(self) -> None:
@@ -853,6 +904,7 @@ class App(tk.Tk):
 
     def _reset_progress_for_url(self) -> None:
         self._progress_determinate = False
+        self.progress.stop()
         self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(10)
 
@@ -871,6 +923,16 @@ class App(tk.Tk):
             messagebox.showwarning(
                 "Invalid URL",
                 "These don't look like YouTube URLs:\n" + "\n".join(invalid[:5]),
+            )
+            return
+
+        # ffmpeg is required for video formats (merge video+audio streams)
+        # and for audio extraction (FFmpegExtractAudio postprocessor)
+        if not shutil.which("ffmpeg"):
+            messagebox.showwarning(
+                "ffmpeg Not Found",
+                "ffmpeg is required but was not found on your PATH.\n"
+                "Install it from https://ffmpeg.org and restart the app.",
             )
             return
 
@@ -923,6 +985,18 @@ class App(tk.Tk):
         try:
             os.makedirs(output_dir, exist_ok=True)
 
+            # Track subprocesses spawned by yt-dlp (ffmpeg) so we can kill
+            # them on window close instead of leaving orphaned processes.
+            _original_popen_init = subprocess.Popen.__init__
+
+            def _tracking_popen_init(
+                popen_self: Any, *args: Any, **kwargs: Any
+            ) -> None:
+                _original_popen_init(popen_self, *args, **kwargs)
+                self._child_procs.add(popen_self)
+
+            subprocess.Popen.__init__ = _tracking_popen_init  # type: ignore[assignment]
+
             success_count = 0
             error_count = 0
             last_title = "Unknown"
@@ -960,6 +1034,19 @@ class App(tk.Tk):
                 }
                 self._safe_after(0, self._update_progress, snap)
 
+            def pp_hook(d: dict[str, Any]) -> None:
+                """Check cancel during post-processing (ffmpeg merge, audio extract, etc.)."""
+                if self._cancel_event.is_set():
+                    raise DownloadError("Cancelled by user")
+                status = d.get("status", "")
+                if status == "started":
+                    self._safe_after(
+                        0,
+                        self._set_status,
+                        f"Post-processing: {d.get('postprocessor', 'ffmpeg')}\u2026",
+                        "loading",
+                    )
+
             for i, url in enumerate(urls, 1):
                 if self._cancel_event.is_set():
                     break
@@ -983,6 +1070,7 @@ class App(tk.Tk):
                     opts = build_ydl_opts(
                         output_dir=output_dir,
                         progress_hooks=[gui_hook],
+                        postprocessor_hooks=[pp_hook],
                         quiet=True,
                         format_preset=format_key,
                         subtitles=subtitles,
@@ -995,8 +1083,11 @@ class App(tk.Tk):
                             raise DownloadError("Could not extract video information")
                         info: dict[str, Any] = dict(raw)
                         title = str(info.get("title", "Unknown"))
-                        last_title = title
                         thumb_url = info.get("thumbnail", "")
+
+                        # Check cancel before thumbnail fetch / download
+                        if self._cancel_event.is_set():
+                            raise DownloadError("Cancelled by user")
 
                         # Fetch thumbnail in this thread (I/O), display on main thread
                         if thumb_url and _has_pil and _is_safe_url(thumb_url):
@@ -1014,12 +1105,12 @@ class App(tk.Tk):
 
                         # Verify formats exist before starting download (guards
                         # against ignore_no_formats_error silently doing nothing)
-                        if not info.get("requested_formats") and not info.get("url"):
-                            fmt_list = info.get("formats")
-                            if not fmt_list:
-                                raise DownloadError(
-                                    f"No downloadable formats for: {title}"
-                                )
+                        if not info.get("formats") and not info.get("url"):
+                            raise DownloadError(f"No downloadable formats for: {title}")
+
+                        # Check cancel before starting actual download
+                        if self._cancel_event.is_set():
+                            raise DownloadError("Cancelled by user")
 
                         # Use download([url]) instead of process_ie_result():
                         # extract_info(download=False) returns an already-processed
@@ -1028,6 +1119,7 @@ class App(tk.Tk):
                         ydl.download([url])
 
                     success_count += 1
+                    last_title = title
                     self._safe_after(0, self._add_history, title, output_dir, "success")
 
                 except DownloadError as e:
@@ -1035,7 +1127,7 @@ class App(tk.Tk):
                         self._safe_after(0, self._on_error, "Cancelled by user")
                         return
                     error_count += 1
-                    err_msg = _ANSI_RE.sub("", str(e))[:120]
+                    err_msg = _ANSI_RE.sub("", str(e))[:300]
                     self._safe_after(
                         0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
                     )
@@ -1044,14 +1136,22 @@ class App(tk.Tk):
                         self._safe_after(0, self._on_error, "Cancelled by user")
                         return
                     error_count += 1
-                    err_msg = _ANSI_RE.sub("", str(e))[:120]
+                    err_msg = _ANSI_RE.sub("", str(e))[:300]
                     self._safe_after(
                         0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
                     )
 
-            # All URLs processed — check cancel first to avoid false success
-            if self._cancel_event.is_set():
+            # All URLs processed — report accurate outcome
+            if self._cancel_event.is_set() and success_count == 0:
                 self._safe_after(0, self._on_error, "Cancelled by user")
+            elif self._cancel_event.is_set() and success_count > 0:
+                self._safe_after(
+                    0,
+                    self._on_partial,
+                    output_dir,
+                    last_title,
+                    f"{success_count} succeeded before cancellation",
+                )
             elif error_count == 0:
                 self._safe_after(
                     0, self._on_success, output_dir, last_title, success_count
@@ -1068,9 +1168,13 @@ class App(tk.Tk):
                 self._safe_after(
                     0, self._on_error, f"All {error_count} download(s) failed"
                 )
-        except Exception:
-            self._safe_after(0, self._on_error, "Unexpected error occurred")
+        except Exception as exc:
+            err_detail = _ANSI_RE.sub("", str(exc))[:300] or "Unexpected error occurred"
+            self._safe_after(0, self._on_error, err_detail)
         finally:
+            # Restore original Popen and discard finished process refs
+            subprocess.Popen.__init__ = _original_popen_init  # type: ignore[assignment]
+            self._child_procs = {p for p in self._child_procs if p.poll() is None}
             self._safe_after(0, self._reset_ui)
 
     # ------------------------------------------------------------------
@@ -1087,21 +1191,38 @@ class App(tk.Tk):
         )
         if len(self._history) > 50:
             self._history = self._history[-50:]
-        save_history(self._history)
+        if not save_history(self._history):
+            self._set_status("Warning: could not save history", "error")
         self._refresh_history_ui()
 
     def _reset_ui(self) -> None:
         self._download_active = False
+        self._close_retries = 0
         self.progress.stop()
         self.btn.configure(state="normal", bg=ACCENT, text="Download")
-        self.btn.bind("<Enter>", lambda e: self.btn.config(bg=ACCENT_GLOW))
-        self.btn.bind("<Leave>", lambda e: self.btn.config(bg=ACCENT))
+        self.btn.bind(
+            "<Enter>",
+            lambda e: (
+                self.btn.config(bg=ACCENT_GLOW)
+                if str(self.btn["state"]) != "disabled"
+                else None
+            ),
+        )
+        self.btn.bind(
+            "<Leave>",
+            lambda e: (
+                self.btn.config(bg=ACCENT)
+                if str(self.btn["state"]) != "disabled"
+                else None
+            ),
+        )
         self.cancel_btn.pack_forget()
         self._hide_speed_eta()
 
     def _on_success(self, output_dir: str, title: str, count: int) -> None:
         self.progress.configure(mode="determinate", value=100)
         self._last_title = title
+        self._hide_thumbnail()
         self.open_btn.pack(side="left", padx=(10, 0), ipadx=20, ipady=10)
         self.copy_title_btn.pack(side="left", padx=(10, 0), ipadx=20, ipady=10)
 
@@ -1116,6 +1237,7 @@ class App(tk.Tk):
     def _on_partial(self, output_dir: str, title: str, msg: str) -> None:
         self.progress.configure(mode="determinate", value=50)  # partial: some succeeded
         self._last_title = title
+        self._hide_thumbnail()
         self.open_btn.pack(side="left", padx=(10, 0), ipadx=20, ipady=10)
         self.copy_title_btn.pack(side="left", padx=(10, 0), ipadx=20, ipady=10)
         self._set_status(msg, "error")
@@ -1130,6 +1252,40 @@ class App(tk.Tk):
 
 
 # ---------------------------------------------------------------------------
+_LOCK_FILE = os.path.join(DATA_DIR, ".yt_gui.lock")
+
+
+def _acquire_instance_lock() -> io.TextIOWrapper | None:
+    """Try to acquire a single-instance advisory lock. Return the file handle
+    on success, or None if another instance already holds the lock."""
+    try:
+        # Open in write mode; on Windows the file stays locked while open
+        lock_fh = open(_LOCK_FILE, "w", encoding="utf-8")  # noqa: SIM115
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(lock_fh.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fh.write(str(os.getpid()))
+        lock_fh.flush()
+        return lock_fh
+    except (OSError, ImportError):
+        return None
+
+
 if __name__ == "__main__":
+    _lock = _acquire_instance_lock()
+    if _lock is None:
+        _root = tk.Tk()
+        _root.withdraw()
+        messagebox.showinfo(
+            "Already Running",
+            "Another instance of YouTube Downloader is already running.",
+        )
+        _root.destroy()
+        sys.exit(0)
     app = App()
     app.mainloop()

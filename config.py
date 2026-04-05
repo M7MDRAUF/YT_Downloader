@@ -61,16 +61,18 @@ def atomic_write_json(path: str, data: Any) -> None:
     """Write JSON to *path* atomically via temp file + os.replace()."""
     dir_name = os.path.dirname(path)
     fd, tmp = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    fd_closed = False
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd_closed = True  # os.fdopen took ownership; with-block will close
             json.dump(data, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
     except BaseException:
-        # os.fdopen may not have taken ownership of fd if it raised
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        if not fd_closed:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(tmp)
         except OSError:
@@ -93,8 +95,10 @@ def load_config() -> dict[str, Any]:
     return cfg
 
 
-def save_config(cfg: dict[str, Any]) -> None:
+def save_config(cfg: dict[str, Any]) -> bool:
+    """Save config; return True on success, False on failure."""
     try:
         atomic_write_json(CONFIG_FILE, cfg)
+        return True
     except Exception:
-        pass
+        return False

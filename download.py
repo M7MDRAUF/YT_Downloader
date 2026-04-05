@@ -61,8 +61,8 @@ def is_valid_url(url: str) -> bool:
 def get_cookies_browser() -> str | None:
     """Return the first browser whose cookie store is accessible, or None.
 
-    The result is cached after the first call to avoid repeatedly probing
-    browser cookie stores on every download.
+    Only positive results are cached — if no browser is found, the next call
+    will probe again (the browser may have been temporarily locked or updating).
     """
     global _cookies_browser_cache, _cookies_browser_checked
     if _cookies_browser_checked:
@@ -78,7 +78,7 @@ def get_cookies_browser() -> str | None:
             return browser
         except Exception:
             continue
-    _cookies_browser_checked = True
+    # Don't cache negative results — allow retry on next download
     return None
 
 
@@ -101,6 +101,7 @@ FORMAT_PRESETS: dict[str, str] = {
 def build_ydl_opts(
     output_dir: str = "downloads",
     progress_hooks: list[Any] | None = None,
+    postprocessor_hooks: list[Any] | None = None,
     quiet: bool = False,
     format_preset: str = "best",
     subtitles: bool = False,
@@ -123,6 +124,7 @@ def build_ydl_opts(
         "progress_hooks": progress_hooks
         if progress_hooks is not None
         else [_cli_progress_hook],
+        "postprocessor_hooks": postprocessor_hooks or [],
         # Keep yt-dlp on the default "main" player JS variant, but do not
         # force YouTube into the segmented "dashy" transport. Forcing dashy
         # makes even plain HTTPS formats download via http_dash_segments,
@@ -247,7 +249,7 @@ def _cli_progress_hook(d: dict[str, Any]) -> None:
         print(f"\r  {percent}  |  Speed: {speed}  |  ETA: {eta}   ", end="", flush=True)
     elif d["status"] == "finished":
         print(
-            f"\r  Merging / post-processing...                        ",
+            "\r  Merging / post-processing...                        ",
             end="",
             flush=True,
         )
