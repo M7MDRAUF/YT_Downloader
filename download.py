@@ -123,17 +123,11 @@ def build_ydl_opts(
         "progress_hooks": progress_hooks
         if progress_hooks is not None
         else [_cli_progress_hook],
-        # Force the "main" player JS variant so the challenge solver can parse it.
-        # The "tv" variant (tv-player-ias.js) currently breaks the solver.
-        # Request DASH fragments ("dashy") so concurrent_fragment_downloads
-        # actually works — without this, YouTube serves single HTTPS streams
-        # where only sequential download is possible.
-        "extractor_args": {
-            "youtube": {
-                "player_js_variant": ["main"],
-                "formats": ["dashy"],
-            }
-        },
+        # Keep yt-dlp on the default "main" player JS variant, but do not
+        # force YouTube into the segmented "dashy" transport. Forcing dashy
+        # makes even plain HTTPS formats download via http_dash_segments,
+        # which can throttle much harder than direct HTTPS on some CDNs.
+        "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
         # Let yt-dlp pick default clients (SABR branch handles SABR protocol
         # natively, so all clients including 'web' work properly now).
         "ignore_no_formats_error": True,
@@ -141,9 +135,13 @@ def build_ydl_opts(
         "retries": 10,
         "fragment_retries": 10,
         "socket_timeout": 30,
-        # Note: concurrent fragment workers don't check for cancellation
-        # between fragments — this is a yt-dlp limitation.  Cancellation
-        # takes effect after the current batch of fragments finishes.
+        # Use chunked HTTP requests for plain HTTPS formats. This helps yt-dlp
+        # recover from long-lived connection throttling without forcing every
+        # YouTube download onto the slower segmented transport path.
+        "http_chunk_size": 10 * 1024 * 1024,
+        # Note: concurrent fragment workers only apply to native dash/hls
+        # transports and don't check for cancellation between fragments.
+        # Cancellation takes effect after the current batch finishes.
         "concurrent_fragment_downloads": 8,
         # Auto-detect throttling: if speed drops below 100 KB/s for 3s,
         # re-extract fresh CDN URLs to bypass YouTube rate limits.
