@@ -202,7 +202,11 @@ def build_ydl_opts(
 
 def get_ydl_version() -> str:
     """Return the installed yt-dlp version string."""
-    return str(getattr(yt_dlp, "__version__", "unknown"))
+    # yt-dlp ≥2026 moved the attribute to yt_dlp.version.__version__
+    ver = getattr(yt_dlp, "__version__", None) or getattr(
+        getattr(yt_dlp, "version", None), "__version__", "unknown"
+    )
+    return str(ver)
 
 
 def download_video(url: str, output_dir: str = "downloads") -> None:
