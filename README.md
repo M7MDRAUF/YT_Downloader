@@ -41,6 +41,25 @@ source .venv/bin/activate
 pip install yt-dlp
 ```
 
+### Development Setup
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+### Quality Tools
+
+```bash
+ruff check .              # Lint
+ruff format .             # Format
+mypy config.py download.py gui.py  # Type check
+pytest tests/             # Tests
+pytest tests/ --cov=.     # Tests with coverage
+bandit -r . --exclude ./.venv -c pyproject.toml  # Security scan
+pip-audit                 # Dependency vulnerabilities
+vulture config.py download.py gui.py  # Dead code
+```
+
 ## Usage
 
 ### GUI
@@ -59,9 +78,16 @@ python download.py [URL]
 
 ```
 YT_Downloader/
-├── gui.py          # tkinter GUI — main application window
-├── download.py     # yt-dlp wrapper, URL validation, CLI entry point
-├── config.py       # Persistent JSON config (saves output dir, format, etc.)
+├── gui.py              # tkinter GUI — main application window
+├── download.py         # yt-dlp wrapper, URL validation, CLI entry point
+├── config.py           # Persistent JSON config (saves output dir, format, etc.)
+├── tests/              # Pytest test suite
+│   ├── test_config.py
+│   ├── test_download.py
+│   └── test_gui.py
+├── pyproject.toml      # Project metadata + tool configs (ruff, mypy, pytest, etc.)
+├── requirements.txt    # Core runtime dependencies
+├── requirements-dev.txt# Dev/QA tool dependencies
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -69,7 +95,7 @@ YT_Downloader/
 
 ## Configuration
 
-Settings are auto-saved to `.yt_config.json` in the project directory on each download. The following options are persisted:
+Settings are auto-saved to `.yt_config.json` under the app's platform-specific data directory on each download. On Windows this is typically `%APPDATA%\YT_Downloader`. The following options are persisted:
 
 | Key           | Default                        | Description                        |
 |---------------|--------------------------------|------------------------------------|
@@ -78,6 +104,7 @@ Settings are auto-saved to `.yt_config.json` in the project directory on each do
 | `subtitles`   | `false`                        | Download subtitles                 |
 | `sponsorblock`| `false`                        | Remove sponsor segments            |
 | `playlist`    | `false`                        | Download full playlist             |
+| `prefer_direct_formats` | `true`               | Prefer direct HTTP formats when available |
 
 ## License
 

@@ -1,42 +1,80 @@
-import re
-import sys
-import os
-import csv
+import contextlib
+import datetime
 import io
 import ipaddress
-import shutil
 import json
-import time
-import threading
+import os
+import re
+import shutil
 import subprocess
-import datetime
+import sys
+import threading
+import time
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import filedialog, messagebox, ttk
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import urlopen, Request
+from urllib.request import Request, urlopen
 
 import yt_dlp
 
+from config import DATA_DIR, atomic_write_json, load_config, save_config
 from download import (
     DownloadError,
     build_ydl_opts,
-    is_valid_url,
     get_ydl_version,
+    is_valid_url,
 )
-from config import load_config, save_config, DATA_DIR, atomic_write_json
 
-_has_pil = False
-try:
-    from PIL import Image, ImageTk  # type: ignore[import-untyped]
+_has_pil: bool | None = None  # None = not yet checked
+_Image: Any = None
+_ImageTk: Any = None
 
-    _has_pil = True
-except ImportError:
-    pass
+_SPEED_UNIT_MULTIPLIERS: dict[str, float] = {
+    "B/s": 1.0,
+    "KB/s": 1_000.0,
+    "MB/s": 1_000_000.0,
+    "GB/s": 1_000_000_000.0,
+    "KiB/s": 1024.0,
+    "MiB/s": 1024.0**2,
+    "GiB/s": 1024.0**3,
+}
+
+
+def _ensure_pil() -> bool:
+    """Lazy-load PIL on first use. Return True if available."""
+    global _has_pil, _Image, _ImageTk
+    if _has_pil is not None:
+        return _has_pil
+    try:
+        from PIL import Image, ImageTk
+
+        _Image = Image
+        _ImageTk = ImageTk
+        _has_pil = True
+    except ImportError:
+        _has_pil = False
+    return _has_pil
+
 
 # yt-dlp embeds ANSI color codes in _percent_str, _speed_str, _eta_str.
 # Tkinter cannot render them — they show as squares.  Strip them.
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_SPEED_RE = re.compile(r"^(?P<value>\d+(?:\.\d+)?)\s*(?P<unit>[KMG]i?B/s|B/s)$")
+
+
+def _format_speed_label(raw_speed: str) -> str:
+    """Show yt-dlp's byte/sec text alongside the equivalent megabits/sec."""
+    speed = raw_speed.strip()
+    match = _SPEED_RE.match(speed)
+    if not match:
+        return speed
+    value = float(match.group("value"))
+    unit = match.group("unit")
+    bytes_per_second = value * _SPEED_UNIT_MULTIPLIERS[unit]
+    megabits_per_second = bytes_per_second * 8 / 1_000_000
+    return f"{speed} ({megabits_per_second:.1f} Mb/s)"
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -76,15 +114,11 @@ FONT_HIST = (_FONT, 10)
 HISTORY_FILE = os.path.join(DATA_DIR, ".yt_history.json")
 
 # Migrate from legacy location (next to source) if different
-_LEGACY_HISTORY = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), ".yt_history.json"
-)
-if DATA_DIR != os.path.dirname(os.path.abspath(__file__)):
-    if os.path.exists(_LEGACY_HISTORY) and not os.path.exists(HISTORY_FILE):
-        try:
-            shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
-        except OSError:
-            pass
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_LEGACY_HISTORY = os.path.join(_SCRIPT_DIR, ".yt_history.json")
+if _SCRIPT_DIR != DATA_DIR and os.path.exists(_LEGACY_HISTORY) and not os.path.exists(HISTORY_FILE):
+    with contextlib.suppress(OSError):
+        shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
 
 FORMAT_LABELS: dict[str, str] = {
     "Best Quality": "best",
@@ -97,7 +131,7 @@ _LABEL_BY_KEY: dict[str, str] = {v: k for k, v in FORMAT_LABELS.items()}
 
 _MAX_THUMB_BYTES = 5 * 1024 * 1024  # 5 MB safety limit for thumbnail downloads
 
-_UNSAFE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})
+_UNSAFE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # noqa: S104 — blocklist, not a binding
 
 
 def _is_safe_url(url: str) -> bool:
@@ -112,12 +146,7 @@ def _is_safe_url(url: str) -> bool:
         # Check for private/reserved IP ranges (SSRF protection)
         try:
             addr = ipaddress.ip_address(hostname)
-            if (
-                addr.is_private
-                or addr.is_loopback
-                or addr.is_reserved
-                or addr.is_link_local
-            ):
+            if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
                 return False
         except ValueError:
             pass  # Not an IP literal — hostname is fine
@@ -142,12 +171,12 @@ def load_history() -> list[dict[str, str]]:
                 for entry in data:  # pyright: ignore[reportUnknownVariableType]
                     if (
                         isinstance(entry, dict)  # pyright: ignore[reportUnnecessaryIsInstance]
-                        and _HISTORY_KEYS.issubset(entry.keys())  # pyright: ignore[reportUnknownArgumentType]
+                        and _HISTORY_KEYS <= entry.keys()  # pyright: ignore[reportUnknownArgumentType]
                         and all(isinstance(entry[k], str) for k in _HISTORY_KEYS)
                     ):
                         result.append(entry)  # pyright: ignore[reportUnknownArgumentType]
                 return result
-        except Exception:
+        except Exception:  # noqa: S110 — fail-soft history load by design
             pass
     return []
 
@@ -242,22 +271,20 @@ class App(tk.Tk):
     # Layout
     # ------------------------------------------------------------------
     def _build_ui(self) -> None:
-        PAD = 20
+        pad = 20
 
         # ── Header ────────────────────────────────────────────────────
         hdr = tk.Frame(self, bg=BG)
-        hdr.pack(fill="x", padx=PAD, pady=(PAD, 6))
+        hdr.pack(fill="x", padx=pad, pady=(pad, 6))
 
         tk.Frame(hdr, bg=ACCENT, width=4).pack(side="left", fill="y", padx=(0, 10))
 
         title_col = tk.Frame(hdr, bg=BG)
         title_col.pack(side="left")
-        tk.Label(
-            title_col, text="YouTube Downloader", bg=BG, fg=TXT_PRIMARY, font=FONT_TITLE
-        ).pack(anchor="w")
-        self.subtitle_var = tk.StringVar(
-            value="Paste a URL, press Enter or click Download"
+        tk.Label(title_col, text="YouTube Downloader", bg=BG, fg=TXT_PRIMARY, font=FONT_TITLE).pack(
+            anchor="w"
         )
+        self.subtitle_var = tk.StringVar(value="Paste a URL, press Enter or click Download")
         tk.Label(
             title_col,
             textvariable=self.subtitle_var,
@@ -268,7 +295,7 @@ class App(tk.Tk):
 
         # ── URL card (multi-line Text) ────────────────────────────────
         outer, card = _make_card(self)
-        outer.pack(fill="x", padx=PAD, pady=(10, 0))
+        outer.pack(fill="x", padx=pad, pady=(10, 0))
 
         tk.Label(
             card,
@@ -312,11 +339,11 @@ class App(tk.Tk):
 
         # ── Save folder card ──────────────────────────────────────────
         outer2, card2 = _make_card(self)
-        outer2.pack(fill="x", padx=PAD, pady=(10, 0))
+        outer2.pack(fill="x", padx=pad, pady=(10, 0))
 
-        tk.Label(
-            card2, text="Save Folder", bg=BG_CARD, fg=TXT_MUTED, font=FONT_LABEL
-        ).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(card2, text="Save Folder", bg=BG_CARD, fg=TXT_MUTED, font=FONT_LABEL).pack(
+            anchor="w", padx=14, pady=(12, 2)
+        )
 
         dir_row = tk.Frame(card2, bg=BG_CARD)
         dir_row.pack(fill="x", padx=14, pady=(0, 12))
@@ -351,11 +378,11 @@ class App(tk.Tk):
 
         # ── Options card ──────────────────────────────────────────────
         outer_opt, card_opt = _make_card(self)
-        outer_opt.pack(fill="x", padx=PAD, pady=(10, 0))
+        outer_opt.pack(fill="x", padx=pad, pady=(10, 0))
 
-        tk.Label(
-            card_opt, text="Options", bg=BG_CARD, fg=TXT_MUTED, font=FONT_LABEL
-        ).pack(anchor="w", padx=14, pady=(12, 2))
+        tk.Label(card_opt, text="Options", bg=BG_CARD, fg=TXT_MUTED, font=FONT_LABEL).pack(
+            anchor="w", padx=14, pady=(12, 2)
+        )
 
         opts_inner = tk.Frame(card_opt, bg=BG_CARD)
         opts_inner.pack(fill="x", padx=14, pady=(0, 12))
@@ -364,9 +391,9 @@ class App(tk.Tk):
         fmt_row = tk.Frame(opts_inner, bg=BG_CARD)
         fmt_row.pack(fill="x", pady=(0, 6))
 
-        tk.Label(
-            fmt_row, text="Format:", bg=BG_CARD, fg=TXT_MUTED, font=FONT_SMALL
-        ).pack(side="left", padx=(0, 8))
+        tk.Label(fmt_row, text="Format:", bg=BG_CARD, fg=TXT_MUTED, font=FONT_SMALL).pack(
+            side="left", padx=(0, 8)
+        )
 
         self.format_var = tk.StringVar(value="Best Quality")
         self.format_combo = ttk.Combobox(
@@ -422,6 +449,22 @@ class App(tk.Tk):
             font=FONT_SMALL,
         ).pack(side="left")
 
+        perf_row = tk.Frame(opts_inner, bg=BG_CARD)
+        perf_row.pack(fill="x", pady=(6, 0))
+
+        self.prefer_direct_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            perf_row,
+            text="Prefer direct HTTP formats",
+            variable=self.prefer_direct_var,
+            bg=BG_CARD,
+            fg=TXT_MUTED,
+            selectcolor=BG_INPUT,
+            activebackground=BG_CARD,
+            activeforeground=TXT_PRIMARY,
+            font=FONT_SMALL,
+        ).pack(side="left", padx=(0, 16))
+
         # ── Thumbnail preview (hidden initially) ──────────────────────
         self.thumb_frame = tk.Frame(self, bg=BG)
         self.thumb_label = tk.Label(self.thumb_frame, bg=BG)
@@ -443,7 +486,7 @@ class App(tk.Tk):
             style="Accent.Horizontal.TProgressbar",
             mode="indeterminate",
         )
-        self.progress.pack(fill="x", padx=PAD, pady=(14, 0))
+        self.progress.pack(fill="x", padx=pad, pady=(14, 0))
 
         # ── Speed / ETA row (hidden initially) ────────────────────────
         self.speed_eta_frame = tk.Frame(self, bg=BG)
@@ -478,11 +521,11 @@ class App(tk.Tk):
             anchor="w",
             justify="left",
         )
-        self.status_lbl.pack(fill="x", padx=PAD, pady=(6, 0))
+        self.status_lbl.pack(fill="x", padx=pad, pady=(6, 0))
 
         # ── Buttons row ───────────────────────────────────────────────
         btn_row = tk.Frame(self, bg=BG)
-        btn_row.pack(fill="x", padx=PAD, pady=(12, 0))
+        btn_row.pack(fill="x", padx=pad, pady=(12, 0))
 
         self.btn = tk.Button(
             btn_row,
@@ -501,18 +544,12 @@ class App(tk.Tk):
         self.btn.bind(
             "<Enter>",
             lambda e: (
-                self.btn.config(bg=ACCENT_GLOW)
-                if str(self.btn["state"]) != "disabled"
-                else None
+                self.btn.config(bg=ACCENT_GLOW) if str(self.btn["state"]) != "disabled" else None
             ),
         )
         self.btn.bind(
             "<Leave>",
-            lambda e: (
-                self.btn.config(bg=ACCENT)
-                if str(self.btn["state"]) != "disabled"
-                else None
-            ),
+            lambda e: self.btn.config(bg=ACCENT) if str(self.btn["state"]) != "disabled" else None,
         )
 
         self.open_btn = tk.Button(
@@ -559,10 +596,10 @@ class App(tk.Tk):
 
         # ── History panel ─────────────────────────────────────────────
         hist_hdr = tk.Frame(self, bg=BG)
-        hist_hdr.pack(fill="x", padx=PAD, pady=(18, 4))
-        tk.Label(
-            hist_hdr, text="Recent Downloads", bg=BG, fg=TXT_MUTED, font=FONT_LABEL
-        ).pack(side="left")
+        hist_hdr.pack(fill="x", padx=pad, pady=(18, 4))
+        tk.Label(hist_hdr, text="Recent Downloads", bg=BG, fg=TXT_MUTED, font=FONT_LABEL).pack(
+            side="left"
+        )
 
         tk.Button(
             hist_hdr,
@@ -593,7 +630,7 @@ class App(tk.Tk):
         ).pack(side="right")
 
         outer3, card3 = _make_card(self)
-        outer3.pack(fill="both", padx=PAD, pady=(0, PAD), expand=True)
+        outer3.pack(fill="both", padx=pad, pady=(0, pad), expand=True)
 
         scrollbar = tk.Scrollbar(
             card3, bg=BG_CARD, troughcolor=BG_INPUT, relief="flat", bd=0, width=8
@@ -625,12 +662,11 @@ class App(tk.Tk):
         cfg = self._cfg
         if cfg.get("output_dir"):
             self.dir_var.set(cfg["output_dir"])
-        self.format_var.set(
-            _LABEL_BY_KEY.get(cfg.get("format", "best"), "Best Quality")
-        )
+        self.format_var.set(_LABEL_BY_KEY.get(cfg.get("format", "best"), "Best Quality"))
         self.sub_var.set(bool(cfg.get("subtitles", False)))
         self.sponsor_var.set(bool(cfg.get("sponsorblock", False)))
         self.playlist_var.set(bool(cfg.get("playlist", False)))
+        self.prefer_direct_var.set(bool(cfg.get("prefer_direct_formats", False)))
 
     def _save_current_config(self) -> None:
         ok = save_config(
@@ -640,6 +676,7 @@ class App(tk.Tk):
                 "subtitles": self.sub_var.get(),
                 "sponsorblock": self.sponsor_var.get(),
                 "playlist": self.playlist_var.get(),
+                "prefer_direct_formats": self.prefer_direct_var.get(),
             }
         )
         if not ok:
@@ -656,19 +693,15 @@ class App(tk.Tk):
         self._safe_after(0, self._show_version, ver)
 
     def _show_version(self, ver: str) -> None:
-        self.subtitle_var.set(
-            f"Paste a URL, press Enter or click Download  \u2022  yt-dlp {ver}"
-        )
+        self.subtitle_var.set(f"Paste a URL, press Enter or click Download  \u2022  yt-dlp {ver}")
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     def _safe_after(self, ms: int, func: Any, *args: Any) -> None:
         """Like self.after() but silently ignores calls on a destroyed widget."""
-        try:
+        with contextlib.suppress(Exception):
             self.after(ms, func, *args)
-        except Exception:
-            pass
 
     def _center(self) -> None:
         self.update_idletasks()
@@ -687,10 +720,8 @@ class App(tk.Tk):
             self._cancel_event.set()
             # Terminate tracked ffmpeg subprocesses to avoid orphans
             for proc in list(self._child_procs):
-                try:
+                with contextlib.suppress(OSError):
                     proc.terminate()
-                except OSError:
-                    pass
             self._child_procs.clear()
             self._close_retries += 1
             if self._close_retries < 25:
@@ -717,7 +748,7 @@ class App(tk.Tk):
             text = self.clipboard_get().strip()
             self.url_text.delete("1.0", "end")
             self.url_text.insert("1.0", text)
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
     def _auto_paste(self, _event: Any) -> None:
@@ -727,13 +758,11 @@ class App(tk.Tk):
             text = self.clipboard_get().strip()
             # Only auto-paste lines that pass URL validation
             valid_lines = [
-                ln
-                for ln in text.splitlines()
-                if ln.strip() and is_valid_url(ln.strip())
+                ln for ln in text.splitlines() if ln.strip() and is_valid_url(ln.strip())
             ]
             if valid_lines:
                 self.url_text.insert("1.0", "\n".join(valid_lines))
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
     def _browse_folder(self) -> None:
@@ -751,7 +780,7 @@ class App(tk.Tk):
             return
         try:
             if sys.platform == "win32":
-                os.startfile(folder)
+                os.startfile(folder)  # noqa: S606
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", folder])
             else:
@@ -812,6 +841,8 @@ class App(tk.Tk):
         )
         if not path:
             return
+        import csv
+
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["time", "title", "path", "status"])
@@ -830,19 +861,19 @@ class App(tk.Tk):
     # Thumbnail
     # ------------------------------------------------------------------
     def _display_thumbnail(self, data: bytes, title: str) -> None:
-        if not _has_pil:
+        if not _ensure_pil():
             return
         try:
-            img = Image.open(io.BytesIO(data))  # type: ignore[possibly-undefined]
+            img = _Image.open(io.BytesIO(data))
             w, h = img.size
             if w > 200:
                 ratio = 200 / w
-                img = img.resize((200, int(h * ratio)), Image.LANCZOS)  # type: ignore[possibly-undefined]
-            self._thumb_photo = ImageTk.PhotoImage(img)  # type: ignore[possibly-undefined]
+                img = img.resize((200, int(h * ratio)), _Image.LANCZOS)
+            self._thumb_photo = _ImageTk.PhotoImage(img)
             self.thumb_label.configure(image=self._thumb_photo)
             self.thumb_title_lbl.configure(text=title)
             self.thumb_frame.pack(fill="x", padx=20, pady=(10, 0), before=self.progress)
-        except Exception:
+        except Exception:  # noqa: S110
             pass
 
     def _hide_thumbnail(self) -> None:
@@ -878,7 +909,7 @@ class App(tk.Tk):
             speed = str(d.get("_speed_str", "")).strip()
             eta = str(d.get("_eta_str", "")).strip()
             if speed:
-                self.speed_lbl.configure(text=speed)
+                self.speed_lbl.configure(text=_format_speed_label(speed))
             if eta:
                 self.eta_lbl.configure(text=f"ETA {eta}")
 
@@ -886,21 +917,38 @@ class App(tk.Tk):
             pl_idx: Any = info.get("playlist_index") or info.get("playlist_autonumber")
             n_entries: Any = info.get("n_entries") or info.get("playlist_count")
             pct_str = str(d.get("_percent_str", "")).strip()
+            stream_type = d.get("_stream_type", "media")
 
             parts: list[str] = []
             if self._queue_total > 1:
-                parts.append(
-                    f"Downloading {d.get('_queue_index', 0)} / {self._queue_total} URLs"
-                )
+                parts.append(f"Downloading {d.get('_queue_index', 0)} / {self._queue_total} URLs")
             if pl_idx and n_entries:
                 parts.append(f"Video {pl_idx} / {n_entries}")
             if not parts:
-                parts.append("Downloading")
+                if stream_type == "video":
+                    parts.append("Downloading video")
+                elif stream_type == "audio":
+                    parts.append("Downloading audio")
+                else:
+                    parts.append("Downloading")
             parts.append(pct_str)
             self._set_status(" \u2014 ".join(parts), "loading")
 
         elif d["status"] == "finished":
-            self._set_status("Merging / post-processing\u2026", "loading")
+            # Do NOT show "Merging / post-processing" here — this fires once
+            # per stream (video then audio).  The real merge is reported by
+            # the postprocessor hook (pp_hook).  Showing "Merging" prematurely
+            # makes the audio-stream download look like a stuck merge.
+            stream_type = d.get("_stream_type", "media")
+            if stream_type == "video":
+                self._set_status("Video stream complete \u2014 downloading audio\u2026", "loading")
+                # Reset progress bar to indeterminate for the audio stream
+                self._progress_determinate = False
+                self.progress.stop()
+                self.progress.configure(mode="indeterminate", value=0)
+                self.progress.start(10)
+            else:
+                self._set_status("Finalizing\u2026", "loading")
 
     def _reset_progress_for_url(self) -> None:
         self._progress_determinate = False
@@ -952,6 +1000,7 @@ class App(tk.Tk):
         subtitles = self.sub_var.get()
         sponsorblock = self.sponsor_var.get()
         playlist = self.playlist_var.get()
+        prefer_direct_formats = self.prefer_direct_var.get()
 
         # UI state
         self.btn.configure(state="disabled", bg="#444455")
@@ -965,7 +1014,15 @@ class App(tk.Tk):
 
         threading.Thread(
             target=self._download_thread,
-            args=(urls, output_dir, format_key, subtitles, sponsorblock, playlist),
+            args=(
+                urls,
+                output_dir,
+                format_key,
+                subtitles,
+                sponsorblock,
+                playlist,
+                prefer_direct_formats,
+            ),
             daemon=True,
         ).start()
 
@@ -981,6 +1038,7 @@ class App(tk.Tk):
         subtitles: bool,
         sponsorblock: bool,
         playlist: bool,
+        prefer_direct_formats: bool,
     ) -> None:
         try:
             os.makedirs(output_dir, exist_ok=True)
@@ -989,9 +1047,7 @@ class App(tk.Tk):
             # them on window close instead of leaving orphaned processes.
             _original_popen_init = subprocess.Popen.__init__
 
-            def _tracking_popen_init(
-                popen_self: Any, *args: Any, **kwargs: Any
-            ) -> None:
+            def _tracking_popen_init(popen_self: Any, *args: Any, **kwargs: Any) -> None:
                 _original_popen_init(popen_self, *args, **kwargs)
                 self._child_procs.add(popen_self)
 
@@ -1003,6 +1059,7 @@ class App(tk.Tk):
 
             _last_hook_time = 0.0
             _current_queue_idx = 0
+            _ansi_sub = _ANSI_RE.sub  # local ref avoids attribute lookup per call
 
             def gui_hook(d: dict[str, Any]) -> None:
                 nonlocal _last_hook_time
@@ -1016,15 +1073,32 @@ class App(tk.Tk):
                 # Extract only needed fields — avoids holding a ref to the
                 # large, mutable info_dict that yt-dlp may recycle.
                 info: dict[str, Any] = d.get("info_dict") or {}
+
+                # Determine stream type so the UI can distinguish the
+                # separate video / audio downloads of a DASH format pair.
+                vcodec = str(info.get("vcodec", "none"))
+                acodec = str(info.get("acodec", "none"))
+                has_video = vcodec != "none"
+                has_audio = acodec != "none"
+                if has_video and has_audio:
+                    stream_type = "combined"
+                elif has_video:
+                    stream_type = "video"
+                elif has_audio:
+                    stream_type = "audio"
+                else:
+                    stream_type = "media"
+
                 snap: dict[str, Any] = {
                     "status": d.get("status"),
                     "total_bytes": d.get("total_bytes"),
                     "total_bytes_estimate": d.get("total_bytes_estimate"),
                     "downloaded_bytes": d.get("downloaded_bytes", 0),
-                    "_speed_str": _ANSI_RE.sub("", str(d.get("_speed_str", ""))),
-                    "_eta_str": _ANSI_RE.sub("", str(d.get("_eta_str", ""))),
-                    "_percent_str": _ANSI_RE.sub("", str(d.get("_percent_str", ""))),
+                    "_speed_str": _ansi_sub("", str(d.get("_speed_str", ""))),
+                    "_eta_str": _ansi_sub("", str(d.get("_eta_str", ""))),
+                    "_percent_str": _ansi_sub("", str(d.get("_percent_str", ""))),
                     "_queue_index": _current_queue_idx,
+                    "_stream_type": stream_type,
                     "info_dict": {
                         "playlist_index": info.get("playlist_index"),
                         "playlist_autonumber": info.get("playlist_autonumber"),
@@ -1062,9 +1136,7 @@ class App(tk.Tk):
                         "loading",
                     )
                 else:
-                    self._safe_after(
-                        0, self._set_status, "Fetching info\u2026", "loading"
-                    )
+                    self._safe_after(0, self._set_status, "Fetching info\u2026", "loading")
 
                 try:
                     opts = build_ydl_opts(
@@ -1076,47 +1148,87 @@ class App(tk.Tk):
                         subtitles=subtitles,
                         sponsorblock=sponsorblock,
                         playlist=playlist,
+                        prefer_direct_formats=prefer_direct_formats,
                     )
-                    with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
-                        raw = ydl.extract_info(url, download=False)
+
+                    if playlist:
+                        # Playlist mode: use extract_flat for metadata.
+                        # Full extract_info resolves every entry (~2 s each),
+                        # blocking for minutes on large playlists and hanging
+                        # on infinite YouTube Mix/Radio lists (list=RD…).
+                        # extract_flat with playlistend=1 returns the playlist
+                        # title + thumbnail in ~1-2 s without resolving entries.
+                        flat_opts = dict(opts)
+                        flat_opts["extract_flat"] = "in_playlist"
+                        flat_opts["playlistend"] = 1  # only need playlist-level metadata
+                        with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:  # type: ignore[arg-type]
+                            raw = flat_ydl.extract_info(url, download=False)
                         if not raw:
-                            raise DownloadError("Could not extract video information")
+                            raise DownloadError("Could not extract playlist information")
                         info: dict[str, Any] = dict(raw)
                         title = str(info.get("title", "Unknown"))
                         thumb_url = info.get("thumbnail", "")
 
-                        # Check cancel before thumbnail fetch / download
                         if self._cancel_event.is_set():
                             raise DownloadError("Cancelled by user")
 
-                        # Fetch thumbnail in this thread (I/O), display on main thread
-                        if thumb_url and _has_pil and _is_safe_url(thumb_url):
+                        if thumb_url and _ensure_pil() and _is_safe_url(thumb_url):
                             try:
-                                req = Request(
+                                req = Request(  # noqa: S310
                                     thumb_url, headers={"User-Agent": "Mozilla/5.0"}
                                 )
-                                with urlopen(req, timeout=10) as resp:
+                                with urlopen(req, timeout=10) as resp:  # noqa: S310
                                     thumb_data = resp.read(_MAX_THUMB_BYTES)
-                                self._safe_after(
-                                    0, self._display_thumbnail, thumb_data, title
-                                )
-                            except Exception:
+                                self._safe_after(0, self._display_thumbnail, thumb_data, title)
+                            except Exception:  # noqa: S110
                                 pass
 
-                        # Verify formats exist before starting download (guards
-                        # against ignore_no_formats_error silently doing nothing)
-                        if not info.get("formats") and not info.get("url"):
-                            raise DownloadError(f"No downloadable formats for: {title}")
-
-                        # Check cancel before starting actual download
                         if self._cancel_event.is_set():
                             raise DownloadError("Cancelled by user")
 
-                        # Use download([url]) instead of process_ie_result():
-                        # extract_info(download=False) returns an already-processed
-                        # result; calling process_ie_result() on it double-processes
-                        # and silently fails for playlists.
-                        ydl.download([url])
+                        # Download: yt-dlp resolves entries lazily via
+                        # playlistend + lazy_playlist already in opts.
+                        with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+                            ydl.download([url])
+
+                    else:
+                        # Single video: full extract_info is fast (one page).
+                        # Reuse the extracted info via process_info to avoid
+                        # a redundant second page fetch.
+                        with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+                            raw = ydl.extract_info(url, download=False)
+                            if not raw:
+                                raise DownloadError("Could not extract video information")
+                            info = dict(raw)
+                            title = str(info.get("title", "Unknown"))
+                            thumb_url = info.get("thumbnail", "")
+
+                            if self._cancel_event.is_set():
+                                raise DownloadError("Cancelled by user")
+
+                            if thumb_url and _ensure_pil() and _is_safe_url(thumb_url):
+                                try:
+                                    req = Request(  # noqa: S310
+                                        thumb_url, headers={"User-Agent": "Mozilla/5.0"}
+                                    )
+                                    with urlopen(req, timeout=10) as resp:  # noqa: S310
+                                        thumb_data = resp.read(_MAX_THUMB_BYTES)
+                                    self._safe_after(
+                                        0, self._display_thumbnail, thumb_data, title
+                                    )
+                                except Exception:  # noqa: S110
+                                    pass
+
+                            if not info.get("formats") and not info.get("url"):
+                                raise DownloadError(f"No downloadable formats for: {title}")
+
+                            if self._cancel_event.is_set():
+                                raise DownloadError("Cancelled by user")
+
+                            if info.get("_type") in ("playlist", "multi_video"):
+                                ydl.download([url])
+                            else:
+                                ydl.process_info(info)  # type: ignore[arg-type]
 
                     success_count += 1
                     last_title = title
@@ -1153,9 +1265,7 @@ class App(tk.Tk):
                     f"{success_count} succeeded before cancellation",
                 )
             elif error_count == 0:
-                self._safe_after(
-                    0, self._on_success, output_dir, last_title, success_count
-                )
+                self._safe_after(0, self._on_success, output_dir, last_title, success_count)
             elif success_count > 0:
                 self._safe_after(
                     0,
@@ -1165,15 +1275,13 @@ class App(tk.Tk):
                     f"{success_count} succeeded, {error_count} failed",
                 )
             else:
-                self._safe_after(
-                    0, self._on_error, f"All {error_count} download(s) failed"
-                )
+                self._safe_after(0, self._on_error, f"All {error_count} download(s) failed")
         except Exception as exc:
             err_detail = _ANSI_RE.sub("", str(exc))[:300] or "Unexpected error occurred"
             self._safe_after(0, self._on_error, err_detail)
         finally:
             # Restore original Popen and discard finished process refs
-            subprocess.Popen.__init__ = _original_popen_init  # type: ignore[assignment]
+            subprocess.Popen.__init__ = _original_popen_init  # type: ignore[method-assign]
             self._child_procs = {p for p in self._child_procs if p.poll() is None}
             self._safe_after(0, self._reset_ui)
 
@@ -1203,18 +1311,12 @@ class App(tk.Tk):
         self.btn.bind(
             "<Enter>",
             lambda e: (
-                self.btn.config(bg=ACCENT_GLOW)
-                if str(self.btn["state"]) != "disabled"
-                else None
+                self.btn.config(bg=ACCENT_GLOW) if str(self.btn["state"]) != "disabled" else None
             ),
         )
         self.btn.bind(
             "<Leave>",
-            lambda e: (
-                self.btn.config(bg=ACCENT)
-                if str(self.btn["state"]) != "disabled"
-                else None
-            ),
+            lambda e: self.btn.config(bg=ACCENT) if str(self.btn["state"]) != "disabled" else None,
         )
         self.cancel_btn.pack_forget()
         self._hide_speed_eta()

@@ -1,7 +1,8 @@
+import functools
+import os
 import re
 import shutil
 import sys
-import os
 from typing import Any
 
 import yt_dlp
@@ -13,7 +14,7 @@ from yt_dlp.utils import DownloadError
 
 # Firefox first: Chrome triggers noisy DPAPI errors on Windows even when it
 # ultimately falls back.  Putting Firefox first avoids those spurious ERRORs.
-_BROWSERS: list[str] = [
+_BROWSERS: tuple[str, ...] = (
     "firefox",
     "chrome",
     "edge",
@@ -21,7 +22,7 @@ _BROWSERS: list[str] = [
     "opera",
     "chromium",
     "vivaldi",
-]
+)
 
 _YT_URL_RE = re.compile(
     r"^https?://"
@@ -32,7 +33,14 @@ _YT_URL_RE = re.compile(
     r")",
 )
 
+_DEFAULT_BUFFER_SIZE = 256 * 1024
+_DEFAULT_HTTP_CHUNK_SIZE = 10 * 1024 * 1024
+_DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS = 8
+_THROTTLED_RATE_LIMIT = 100_000
+_DEFAULT_PLAYLIST_LIMIT = 200
 
+
+@functools.lru_cache(maxsize=1)
 def _find_deno() -> str | None:
     """Find the deno binary, checking PATH and common Windows install locations."""
     found = shutil.which("deno")
@@ -40,9 +48,7 @@ def _find_deno() -> str | None:
         return found
     if sys.platform == "win32":
         # Winget shim may not be on PATH in all terminal contexts (e.g. VS Code bg shells)
-        winget_shim = os.path.expandvars(
-            r"%LOCALAPPDATA%\Microsoft\WinGet\Links\deno.EXE"
-        )
+        winget_shim = os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\WinGet\Links\deno.EXE")
         if os.path.isfile(winget_shim):
             return winget_shim
     return None
@@ -72,11 +78,11 @@ def get_cookies_browser() -> str | None:
             with yt_dlp.YoutubeDL(
                 {"cookiesfrombrowser": (browser,), "quiet": True, "no_warnings": True}
             ) as ydl:
-                ydl.cookiejar  # triggers cookie load
+                _ = ydl.cookiejar  # triggers cookie load
             _cookies_browser_cache = browser
             _cookies_browser_checked = True
             return browser
-        except Exception:
+        except Exception:  # noqa: S112 — intentional: probe browsers in order
             continue
     # Don't cache negative results — allow retry on next download
     return None
@@ -107,6 +113,7 @@ def build_ydl_opts(
     subtitles: bool = False,
     sponsorblock: bool = False,
     playlist: bool = False,
+    prefer_direct_formats: bool = False,
 ) -> dict[str, Any]:
     """Build the canonical yt-dlp option dict.
 
@@ -121,9 +128,14 @@ def build_ydl_opts(
         "format": fmt,
         "outtmpl": os.path.join(output_dir, "%(title)s.%(ext)s"),
         "noplaylist": not playlist,
-        "progress_hooks": progress_hooks
-        if progress_hooks is not None
-        else [_cli_progress_hook],
+        # Safety: cap playlist entries to avoid hanging on infinite playlists
+        # (e.g. YouTube Mix/Radio with list=RD…). Process lazily so yt-dlp
+        # yields entries as they arrive instead of waiting for full enumeration.
+        **({
+            "playlistend": _DEFAULT_PLAYLIST_LIMIT,
+            "lazy_playlist": True,
+        } if playlist else {}),
+        "progress_hooks": progress_hooks if progress_hooks is not None else [_cli_progress_hook],
         "postprocessor_hooks": postprocessor_hooks or [],
         # Keep yt-dlp on the default "main" player JS variant, but do not
         # force YouTube into the segmented "dashy" transport. Forcing dashy
@@ -137,28 +149,40 @@ def build_ydl_opts(
         "retries": 10,
         "fragment_retries": 10,
         "socket_timeout": 30,
+        # Use a larger initial buffer on fast connections while still letting
+        # yt-dlp resize dynamically as needed.
+        "buffersize": _DEFAULT_BUFFER_SIZE,
         # Use chunked HTTP requests for plain HTTPS formats. This helps yt-dlp
         # recover from long-lived connection throttling without forcing every
         # YouTube download onto the slower segmented transport path.
-        "http_chunk_size": 10 * 1024 * 1024,
+        "http_chunk_size": _DEFAULT_HTTP_CHUNK_SIZE,
         # Note: concurrent fragment workers only apply to native dash/hls
         # transports and don't check for cancellation between fragments.
         # Cancellation takes effect after the current batch finishes.
-        "concurrent_fragment_downloads": 8,
+        "concurrent_fragment_downloads": _DEFAULT_CONCURRENT_FRAGMENT_DOWNLOADS,
         # Auto-detect throttling: if speed drops below 100 KB/s for 3s,
         # re-extract fresh CDN URLs to bypass YouTube rate limits.
-        "throttledratelimit": 100_000,
+        "throttledratelimit": _THROTTLED_RATE_LIMIT,
     }
     # Only configure Deno JS runtime when the binary is present (SABR-fork feature)
     if deno_path:
         opts["js_runtimes"] = {"deno": {"path": deno_path}}
+    if prefer_direct_formats:
+        # Prefer direct HTTP(S) delivery when yt-dlp sees equally suitable
+        # formats. This preserves the user's quality choice while nudging
+        # selection away from slower segmented transports when possible.
+        opts["format_sort"] = ["proto"]
     if not is_audio:
         opts["merge_output_format"] = "mp4"
         # Move the MOOV atom (seek index) to the start of the MP4 file.
         # Without this, DASH fragment downloads place it at the end,
         # making seeking impossible in long videos — the player restarts
         # from the beginning instead of jumping to the requested time.
-        opts["postprocessor_args"] = {"merger": ["-movflags", "+faststart"]}
+        # -threads 0: let ffmpeg auto-detect CPU cores (no effect for
+        # remux with -c copy, but speeds up any re-encoding fallback).
+        opts["postprocessor_args"] = {
+            "merger": ["-movflags", "+faststart", "-threads", "0"],
+        }
 
     # Subtitles
     if subtitles:
@@ -169,8 +193,9 @@ def build_ydl_opts(
 
     # SponsorBlock must run BEFORE FFmpegExtractAudio so chapters exist in the video stream
     if sponsorblock:
-        opts.setdefault("postprocessors", []).append({"key": "SponsorBlock"})
-        opts.setdefault("postprocessors", []).append(
+        pps = opts.setdefault("postprocessors", [])
+        pps.append({"key": "SponsorBlock"})
+        pps.append(
             {
                 "key": "ModifyChapters",
                 "remove_sponsor_segments": ["sponsor", "selfpromo", "interaction"],
@@ -231,11 +256,13 @@ def download_video(url: str, output_dir: str = "downloads") -> None:
         print(f"Duration : {mins}m {secs}s")
         print(f"Saving to: {os.path.abspath(output_dir)}\n")
 
-        # Use download([url]) instead of process_ie_result():
-        # extract_info(download=False) returns an already-processed result;
-        # calling process_ie_result() on it double-processes and silently
-        # fails for playlists.
-        ydl.download([url])
+        if info.get("_type") in ("playlist", "multi_video"):
+            # Playlist: use download() for full entry handling
+            ydl.download([url])
+        else:
+            # Single video: reuse the already-extracted info so yt-dlp
+            # does not re-fetch the YouTube page a second time.
+            ydl.process_info(info)  # type: ignore[arg-type]
 
     print("\nDownload complete!")
 
@@ -253,7 +280,7 @@ def _cli_progress_hook(d: dict[str, Any]) -> None:
         print(f"\r  {percent}  |  Speed: {speed}  |  ETA: {eta}   ", end="", flush=True)
     elif d["status"] == "finished":
         print(
-            "\r  Merging / post-processing...                        ",
+            "\r  Download complete \u2014 processing\u2026                  ",
             end="",
             flush=True,
         )
@@ -277,9 +304,7 @@ def main() -> None:
         print("Error: That doesn't look like a YouTube URL.")
         sys.exit(1)
 
-    output_dir = (
-        input("Save folder [press Enter for 'downloads']: ").strip() or "downloads"
-    )
+    output_dir = input("Save folder [press Enter for 'downloads']: ").strip() or "downloads"
 
     try:
         download_video(url, output_dir)

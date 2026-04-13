@@ -1,0 +1,123 @@
+[project]
+name = "yt-downloader"
+version = "1.0.0"
+description = "A clean, dark-themed desktop GUI for downloading YouTube videos and playlists"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "M7MDRAUF" }]
+dependencies = ["yt-dlp>=2024.0.0"]
+
+[project.optional-dependencies]
+thumbnails = ["Pillow>=10.0.0"]
+dev = [
+    "ruff>=0.15.0",
+    "mypy>=1.15.0",
+    "pytest>=8.0.0",
+    "pytest-cov>=6.0.0",
+    "bandit>=1.9.0",
+    "pip-audit>=2.9.0",
+    "vulture>=2.14",
+]
+
+[project.scripts]
+yt-downloader-gui = "gui:main"
+yt-downloader = "download:main"
+
+# ---------------------------------------------------------------------------
+# Ruff — linter + formatter
+# ---------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["."]
+
+[tool.ruff.lint]
+select = [
+    "F",     # pyflakes
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "A",     # flake8-builtins
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+    "TCH",   # flake8-type-checking
+    "RUF",   # ruff-specific rules
+    "S",     # flake8-bandit (security)
+    "PT",    # flake8-pytest-style
+]
+ignore = [
+    "S603",  # subprocess call - check for execution of untrusted input (we need subprocess)
+    "S607",  # starting a process with a partial executable path (xdg-open, open)
+    "S311",  # pseudo-random generators (not used for security)
+    "B904",  # within an except clause raise from err (existing pattern is fine)
+    "UP015", # unnecessary open mode parameters (explicit is better)
+    "SIM108", # ternary operator (readability preference)
+    "SIM300", # Yoda conditions (style preference, not a bug)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101", "S108", "PT011"]  # allow assert, /tmp paths, broad exceptions in tests
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+# ---------------------------------------------------------------------------
+# Mypy — static type checker
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false  # Pylance uses different error codes than mypy
+show_error_codes = true
+# Third-party libraries without stubs
+[[tool.mypy.overrides]]
+module = ["yt_dlp", "yt_dlp.*", "PIL", "PIL.*"]
+ignore_missing_imports = true
+
+# ---------------------------------------------------------------------------
+# Pytest
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", ".venv/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_empty = true
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.",
+    "if TYPE_CHECKING:",
+]
+
+# ---------------------------------------------------------------------------
+# Bandit — security linter
+# ---------------------------------------------------------------------------
+[tool.bandit]
+exclude_dirs = ["tests", ".venv"]
+skips = ["B603", "B607", "B404", "B110", "B112", "B104", "B606", "B310"]  # all flagged patterns are intentional/guarded
+
+# ---------------------------------------------------------------------------
+# Vulture — dead code detection
+# ---------------------------------------------------------------------------
+[tool.vulture]
+min_confidence = 80
+paths = ["config.py", "download.py", "gui.py"]

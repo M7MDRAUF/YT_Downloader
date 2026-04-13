@@ -35,5 +35,14 @@ desktop.ini
 
 # Logs
 *.log
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# GitHub config
 .github
 .github/

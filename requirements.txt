@@ -1,0 +1,5 @@
+# Core dependencies
+yt-dlp>=2024.0.0
+
+# Optional: thumbnail preview support
+# Pillow>=10.0.0

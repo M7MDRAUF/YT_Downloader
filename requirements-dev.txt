@@ -1,0 +1,8 @@
+# Development / QA tools
+ruff>=0.15.0
+mypy>=1.15.0
+pytest>=8.0.0
+pytest-cov>=6.0.0
+bandit>=1.9.0
+pip-audit>=2.9.0
+vulture>=2.14
