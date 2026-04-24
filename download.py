@@ -1,4 +1,5 @@
 import functools
+import importlib.util
 import os
 import re
 import shutil
@@ -52,6 +53,58 @@ def _find_deno() -> str | None:
         if os.path.isfile(winget_shim):
             return winget_shim
     return None
+
+
+@functools.lru_cache(maxsize=1)
+def _has_bundled_ejs() -> bool:
+    """Return True if the ``yt-dlp-ejs`` companion package is importable.
+
+    yt-dlp delegates YouTube JavaScript challenge solving to scripts shipped in
+    the ``yt_dlp_ejs`` package (installed via the ``yt-dlp[default]`` extra).
+    When it is missing, yt-dlp can still fetch the scripts at runtime via
+    ``remote_components`` — see :func:`_default_remote_components`.
+    """
+    return importlib.util.find_spec("yt_dlp_ejs") is not None
+
+
+def _default_remote_components() -> list[str]:
+    """Return the list of remote-component sources to enable as a fallback.
+
+    - When ``yt-dlp-ejs`` is bundled locally, no remote fetch is needed.
+    - Otherwise prefer ``ejs:github`` (works with any runtime, including the
+      ones yt-dlp may add later); also enable ``ejs:npm`` when ``deno`` is
+      available, since the npm path requires a runtime that supports on-the-fly
+      npm package resolution (deno or bun).
+    """
+    if _has_bundled_ejs():
+        return []
+    components = ["ejs:github"]
+    if _find_deno():
+        components.append("ejs:npm")
+    return components
+
+
+def describe_ejs_status() -> str:
+    """Return a single human-readable line describing the EJS solver setup.
+
+    Used by the CLI startup banner and the GUI status bar so users can tell
+    at a glance whether YouTube downloads are likely to succeed.
+    """
+    runtime = "deno" if _find_deno() else "none"
+    if _has_bundled_ejs():
+        return f"EJS solver: bundled (yt-dlp-ejs) | JS runtime: {runtime}"
+    remote = _default_remote_components()
+    if remote and runtime != "none":
+        return f"EJS solver: remote ({', '.join(remote)}) | JS runtime: {runtime}"
+    if remote:
+        return (
+            f"EJS solver: remote ({', '.join(remote)}) | JS runtime: none "
+            "— install deno (https://deno.com) for reliable YouTube downloads"
+        )
+    return (
+        "EJS solver: NOT CONFIGURED — run "
+        '`pip install -U "yt-dlp[default]"` or install deno + allow remote components'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +176,7 @@ def build_ydl_opts(
     fmt = FORMAT_PRESETS.get(format_preset, FORMAT_PRESETS["best"])
     is_audio = format_preset == "audio"
     deno_path = _find_deno()
+    remote_components = _default_remote_components()
 
     opts: dict[str, Any] = {
         "format": fmt,
@@ -131,10 +185,14 @@ def build_ydl_opts(
         # Safety: cap playlist entries to avoid hanging on infinite playlists
         # (e.g. YouTube Mix/Radio with list=RD…). Process lazily so yt-dlp
         # yields entries as they arrive instead of waiting for full enumeration.
-        **({
-            "playlistend": _DEFAULT_PLAYLIST_LIMIT,
-            "lazy_playlist": True,
-        } if playlist else {}),
+        **(
+            {
+                "playlistend": _DEFAULT_PLAYLIST_LIMIT,
+                "lazy_playlist": True,
+            }
+            if playlist
+            else {}
+        ),
         "progress_hooks": progress_hooks if progress_hooks is not None else [_cli_progress_hook],
         "postprocessor_hooks": postprocessor_hooks or [],
         # Keep yt-dlp on the default "main" player JS variant, but do not
@@ -142,9 +200,10 @@ def build_ydl_opts(
         # makes even plain HTTPS formats download via http_dash_segments,
         # which can throttle much harder than direct HTTPS on some CDNs.
         "extractor_args": {"youtube": {"player_js_variant": ["main"]}},
-        # Let yt-dlp pick default clients (SABR branch handles SABR protocol
-        # natively, so all clients including 'web' work properly now).
-        "ignore_no_formats_error": True,
+        # Note: previously we passed ignore_no_formats_error=True here, which
+        # silently swallowed the exact failure caused by a missing EJS solver
+        # ("No video formats found"). The remote_components fallback below
+        # plus a clear startup diagnostic make that error message useful again.
         # Network resilience
         "retries": 10,
         "fragment_retries": 10,
@@ -167,6 +226,11 @@ def build_ydl_opts(
     # Only configure Deno JS runtime when the binary is present (SABR-fork feature)
     if deno_path:
         opts["js_runtimes"] = {"deno": {"path": deno_path}}
+    # Allow yt-dlp to fetch EJS challenge-solver scripts at runtime when the
+    # bundled ``yt-dlp-ejs`` package is not installed. Unsupported entries are
+    # ignored by yt-dlp with a warning, so this is safe across versions.
+    if remote_components:
+        opts["remote_components"] = remote_components
     if prefer_direct_formats:
         # Prefer direct HTTP(S) delivery when yt-dlp sees equally suitable
         # formats. This preserves the user's quality choice while nudging
@@ -290,6 +354,7 @@ def main() -> None:
     print("=" * 50)
     print("       YouTube Video Downloader (yt-dlp)")
     print("=" * 50)
+    print(describe_ejs_status())
 
     if len(sys.argv) > 1:
         url = sys.argv[1].strip()

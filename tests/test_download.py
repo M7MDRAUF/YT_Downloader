@@ -1,5 +1,9 @@
 """Tests for download.py — URL validation, format presets, option building."""
 
+# pyright: reportPrivateUsage=false
+# Tests intentionally exercise module-private helpers (e.g. _has_bundled_ejs,
+# _default_remote_components, _DEFAULT_PLAYLIST_LIMIT) to lock in behaviour.
+
 import pytest
 
 import download
@@ -174,6 +178,84 @@ class TestBuildYdlOpts:
         assert "postprocessor_args" not in opts or "merger" not in opts.get(
             "postprocessor_args", {}
         )
+
+    def test_ignore_no_formats_error_not_set(self) -> None:
+        """ignore_no_formats_error masks the missing-EJS-solver failure mode and was removed."""
+        opts = download.build_ydl_opts()
+        assert "ignore_no_formats_error" not in opts
+
+    def test_remote_components_absent_when_ejs_bundled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: True)
+        monkeypatch.setattr(download, "_find_deno", lambda: None)
+        opts = download.build_ydl_opts()
+        assert "remote_components" not in opts
+
+    def test_remote_components_present_when_ejs_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: False)
+        monkeypatch.setattr(download, "_find_deno", lambda: None)
+        opts = download.build_ydl_opts()
+        assert opts["remote_components"] == ["ejs:github"]
+
+    def test_remote_components_includes_npm_when_deno_present(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: False)
+        monkeypatch.setattr(download, "_find_deno", lambda: "/fake/deno")
+        opts = download.build_ydl_opts()
+        assert opts["remote_components"] == ["ejs:github", "ejs:npm"]
+
+
+class TestEjsHelpers:
+    """EJS solver detection helpers."""
+
+    def test_has_bundled_ejs_returns_bool(self) -> None:
+        assert isinstance(download._has_bundled_ejs(), bool)
+
+    def test_default_remote_components_empty_when_bundled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: True)
+        assert download._default_remote_components() == []
+
+    def test_default_remote_components_github_only_without_deno(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: False)
+        monkeypatch.setattr(download, "_find_deno", lambda: None)
+        assert download._default_remote_components() == ["ejs:github"]
+
+    def test_default_remote_components_includes_npm_with_deno(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: False)
+        monkeypatch.setattr(download, "_find_deno", lambda: "/fake/deno")
+        assert download._default_remote_components() == ["ejs:github", "ejs:npm"]
+
+    def test_describe_ejs_status_bundled(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: True)
+        monkeypatch.setattr(download, "_find_deno", lambda: "/fake/deno")
+        msg = download.describe_ejs_status()
+        assert "bundled" in msg
+        assert "deno" in msg
+
+    def test_describe_ejs_status_remote_with_runtime(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: False)
+        monkeypatch.setattr(download, "_find_deno", lambda: "/fake/deno")
+        msg = download.describe_ejs_status()
+        assert "remote" in msg
+        assert "ejs:github" in msg
+
+    def test_describe_ejs_status_remote_without_runtime(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "_has_bundled_ejs", lambda: False)
+        monkeypatch.setattr(download, "_find_deno", lambda: None)
+        msg = download.describe_ejs_status()
+        assert "deno" in msg.lower()
 
 
 class TestGetYdlVersion:

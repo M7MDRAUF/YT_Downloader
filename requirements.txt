@@ -1,5 +1,10 @@
 # Core dependencies
-yt-dlp>=2024.0.0
+# The [default] extra installs yt-dlp-ejs, which ships the EJS challenge solver
+# scripts required to download YouTube videos (n-sig / JSC challenges). Without
+# it, yt-dlp can fall back to fetching the scripts from GitHub at runtime, but
+# the bundled package is offline, deterministic, and version-pinned against the
+# installed yt-dlp. See https://github.com/yt-dlp/yt-dlp/wiki/EJS
+yt-dlp[default]>=2025.10.0
 
 # Optional: thumbnail preview support
 # Pillow>=10.0.0

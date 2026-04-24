@@ -22,10 +22,10 @@ A clean, dark-themed desktop GUI for downloading YouTube videos and playlists �
 
 - Python 3.11+
 - [ffmpeg](https://ffmpeg.org/download.html) — required for video/audio merging and MP3 conversion
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- [yt-dlp](https://github.com/yt-dlp/yt-dlp) **with the `[default]` extra** — installs `yt-dlp-ejs`, the EJS challenge solver scripts required by modern YouTube extractors. Without it, downloads fail with *"No video formats found"*.
 
 Optional:
-- [Deno](https://deno.land/) — enables SABR protocol support for yt-dlp (auto-detected)
+- [Deno](https://deno.land/) — JavaScript runtime that runs the EJS solver scripts. Auto-detected on `PATH` (and the WinGet shim on Windows). If `deno` is missing, the app falls back to enabling `--remote-components ejs:github` so yt-dlp can still solve the challenges using GitHub-hosted scripts.
 
 ## Installation
 
@@ -38,7 +38,7 @@ python -m venv .venv
 # macOS / Linux
 source .venv/bin/activate
 
-pip install yt-dlp
+pip install -r requirements.txt
 ```
 
 ### Development Setup

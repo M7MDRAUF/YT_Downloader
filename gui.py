@@ -22,6 +22,7 @@ from config import DATA_DIR, atomic_write_json, load_config, save_config
 from download import (
     DownloadError,
     build_ydl_opts,
+    describe_ejs_status,
     get_ydl_version,
     is_valid_url,
 )
@@ -510,7 +511,9 @@ class App(tk.Tk):
         self.eta_lbl.pack(side="right")
 
         # ── Status label ──────────────────────────────────────────────
-        self.status_var = tk.StringVar(value="Ready \u2014 paste a URL above")
+        # Show EJS solver readiness up front so users see at a glance whether
+        # YouTube downloads are likely to work. Overwritten on first action.
+        self.status_var = tk.StringVar(value=f"Ready \u2014 {describe_ejs_status()}")
         self.status_lbl = tk.Label(
             self,
             textvariable=self.status_var,
@@ -1213,9 +1216,7 @@ class App(tk.Tk):
                                     )
                                     with urlopen(req, timeout=10) as resp:  # noqa: S310
                                         thumb_data = resp.read(_MAX_THUMB_BYTES)
-                                    self._safe_after(
-                                        0, self._display_thumbnail, thumb_data, title
-                                    )
+                                    self._safe_after(0, self._display_thumbnail, thumb_data, title)
                                 except Exception:  # noqa: S110
                                     pass
 
