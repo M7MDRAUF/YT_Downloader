@@ -5,38 +5,120 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    # Mondays 06:00 UTC — drives the dependency audit only.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # Lint, types and security run once on Linux — there is nothing
+  # platform-specific about them, so spending 9 matrix cells on them is waste.
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: python -m ruff check .
+
+      - name: Format check (ruff)
+        run: python -m ruff format --check .
+
+      - name: Type check (mypy)
+        run: python -m mypy config.py download.py gui.py
+
+      - name: Security (bandit)
+        run: python -m bandit -c pyproject.toml -r .
+
+      - name: Dead code (vulture)
+        run: python -m vulture
+
   test:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        # 3.14 is the version this is actually developed on; without it the
+        # only Python anyone runs the app under is untested.
+        python-version: ["3.11", "3.13", "3.14"]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: Lint (ruff)
-        run: python -m ruff check .
+      # One pytest run, not two: the coverage invocation runs the whole suite.
+      # ffmpeg is deliberately NOT installed — the suite is fully offline and
+      # never invokes it, so it would cost minutes per runner for no coverage.
+      - name: Tests + coverage
+        run: >-
+          python -m pytest tests/ -v --tb=short
+          --cov=. --cov-report=term-missing --cov-fail-under=45
 
-      - name: Type check (mypy)
-        run: python -m mypy config.py download.py gui.py
+      # The blended number lets a well-covered core hide behind untestable GUI
+      # code, so hold the two library modules to a much higher bar separately.
+      - name: Core module coverage floor
+        run: python -m coverage report --include="download.py,config.py" --fail-under=85
 
-      - name: Tests
-        run: python -m pytest tests/ -v --tb=short
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: Coverage
-        run: python -m pytest tests/ --cov=. --cov-report=term-missing --cov-fail-under=35
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # This job exists because the project was unbuildable for its whole
+      # history: no [build-system], and a flat layout setuptools refuses to
+      # auto-discover. Nothing else would catch that regressing.
+      - name: Install the package
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Console script is reachable
+        run: yt-downloader --help
+
+  audit:
+    # Weekly, not per-PR: a fresh yt-dlp CVE should not turn an unrelated pull
+    # request red.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+      - name: Dependency audit (pip-audit)
+        run: python -m pip_audit

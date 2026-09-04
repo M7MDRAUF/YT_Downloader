@@ -1,11 +1,16 @@
 """Tests for gui.py — URL safety, history persistence, helpers."""
 
 import json
+import subprocess
+import sys
+import threading
 from unittest import mock
 
 import pytest
 
+import download
 import gui  # imported after conftest installs the tkinter stub
+from gui import history_csv_rows
 
 
 class TestIsSafeUrl:
@@ -128,20 +133,12 @@ class TestSaveHistory:
 
 
 class TestStreamTypeDetection:
-    """_update_progress uses stream type to distinguish video/audio downloads."""
+    """gui_hook tags progress updates with the stream type.
 
-    @staticmethod
-    def _stream_type(vcodec: str, acodec: str) -> str:
-        """Mirror the stream-type logic from gui_hook for unit testing."""
-        has_video = vcodec != "none"
-        has_audio = acodec != "none"
-        if has_video and has_audio:
-            return "combined"
-        if has_video:
-            return "video"
-        if has_audio:
-            return "audio"
-        return "media"
+    These used to test a copy of the logic pasted into this file, which could
+    never catch a regression in the real code.  They now call the shared
+    implementation in download.py.
+    """
 
     @pytest.mark.parametrize(
         ("vcodec", "acodec", "expected"),
@@ -155,4 +152,55 @@ class TestStreamTypeDetection:
         ],
     )
     def test_stream_type_classification(self, vcodec: str, acodec: str, expected: str) -> None:
-        assert self._stream_type(vcodec, acodec) == expected
+        assert download.classify_stream_type({"vcodec": vcodec, "acodec": acodec}) == expected
+
+    def test_missing_codec_keys_default_to_media(self) -> None:
+        assert download.classify_stream_type({}) == "media"
+
+
+class TestHistoryCsvRows:
+    def test_header_comes_first(self) -> None:
+        assert history_csv_rows([])[0] == ["time", "title", "path", "status"]
+
+    def test_row_order_matches_header(self) -> None:
+        rows = history_csv_rows([{"time": "T", "title": "Vid", "path": "/d", "status": "success"}])
+        assert rows[1] == ["T", "Vid", "/d", "success"]
+
+    def test_missing_status_defaults_to_success(self) -> None:
+        rows = history_csv_rows([{"time": "T", "title": "V", "path": "/d"}])
+        assert rows[1][3] == "success"
+
+
+class TestTrackChildProcesses:
+    """The context manager that replaced the UnboundLocalError-prone try/finally."""
+
+    def test_restores_popen_on_normal_exit(self) -> None:
+        original = subprocess.Popen.__init__
+        with gui._track_child_processes(set()):
+            assert subprocess.Popen.__init__ is not original
+        assert subprocess.Popen.__init__ is original
+
+    def test_restores_popen_when_body_raises(self) -> None:
+        # This is the regression: an exception inside the block must still
+        # restore the patch.  The old code raised UnboundLocalError here and
+        # left the app permanently disabled.
+        original = subprocess.Popen.__init__
+        with pytest.raises(ValueError, match="boom"), gui._track_child_processes(set()):
+            raise ValueError("boom")
+        assert subprocess.Popen.__init__ is original
+
+    def test_registers_spawned_process(self) -> None:
+        sink: set[object] = set()
+        with gui._track_child_processes(sink):
+            proc = subprocess.Popen([sys.executable, "-c", "pass"])
+            proc.wait()
+        assert proc in sink
+
+    def test_uses_lock_when_supplied(self) -> None:
+        sink: set[object] = set()
+        lock = threading.Lock()
+        with gui._track_child_processes(sink, lock):
+            proc = subprocess.Popen([sys.executable, "-c", "pass"])
+            proc.wait()
+        assert proc in sink
+        assert not lock.locked()

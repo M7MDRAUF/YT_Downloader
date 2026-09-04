@@ -83,6 +83,12 @@ def _install_tkinter_stub() -> None:
 
 _install_tkinter_stub()
 
+# Captured before any fixture patches it, so tests that genuinely target the
+# cookie-probe logic can opt back into the real implementation.
+import download  # noqa: E402 — must follow the tkinter stub install
+
+_REAL_GET_COOKIES_BROWSER = download.get_cookies_browser
+
 
 @pytest.fixture(autouse=True)
 def _no_browser_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,6 +102,19 @@ def _no_browser_cookies(monkeypatch: pytest.MonkeyPatch) -> None:
     import download
 
     monkeypatch.setattr(download, "get_cookies_browser", lambda: None)
+
+
+@pytest.fixture
+def real_cookie_probe(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Restore the genuine ``get_cookies_browser`` for tests that target it.
+
+    The autouse fixture above stubs it out for everyone; these tests supply
+    their own fake ``YoutubeDL`` so no real cookie store is ever opened.
+    """
+    import download
+
+    monkeypatch.setattr(download, "get_cookies_browser", _REAL_GET_COOKIES_BROWSER)
+    return _REAL_GET_COOKIES_BROWSER
 
 
 @pytest.fixture

@@ -1,9 +1,16 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "yt-downloader"
 version = "1.0.0"
 description = "A clean, dark-themed desktop GUI for downloading YouTube videos and playlists"
 readme = "README.md"
-license = { text = "MIT" }
+# PEP 639: the { text = "MIT" } table form is deprecated and errors on
+# setuptools >= 77.
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{ name = "M7MDRAUF" }]
 # yt-dlp[default] pulls in yt-dlp-ejs (EJS challenge solver scripts) which is
@@ -20,11 +27,23 @@ dev = [
     "bandit>=1.9.0",
     "pip-audit>=2.9.0",
     "vulture>=2.14",
+    # Without this mypy falls back to ignore_missing_imports for yt_dlp, so CI
+    # and a developer machine that happens to have the stubs disagree.
+    "types-yt-dlp",
 ]
 
 [project.scripts]
-yt-downloader-gui = "gui:main"
 yt-downloader = "download:main"
+
+# gui-scripts, not scripts: on Windows a console entry point opens a black cmd
+# window behind the Tk app.
+[project.gui-scripts]
+yt-downloader-gui = "gui:main"
+
+# Flat layout with three top-level modules — setuptools auto-discovery refuses
+# to guess ("Multiple top-level modules discovered"), so name them explicitly.
+[tool.setuptools]
+py-modules = ["config", "download", "gui"]
 
 # ---------------------------------------------------------------------------
 # Ruff — linter + formatter

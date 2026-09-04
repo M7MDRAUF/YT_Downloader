@@ -22,10 +22,14 @@ import yt_dlp
 
 from config import DATA_DIR, atomic_write_json, load_config, save_config
 from download import (
+    FORMAT_LABELS,
     DownloadError,
     build_ydl_opts,
+    classify_stream_type,
     describe_ejs_status,
+    extract_and_download,
     get_ydl_version,
+    has_ffmpeg,
     is_valid_url,
 )
 
@@ -123,14 +127,9 @@ if _SCRIPT_DIR != DATA_DIR and os.path.exists(_LEGACY_HISTORY) and not os.path.e
     with contextlib.suppress(OSError):
         shutil.copy2(_LEGACY_HISTORY, HISTORY_FILE)
 
-FORMAT_LABELS: dict[str, str] = {
-    "Best Quality": "best",
-    "1080p": "1080p",
-    "720p": "720p",
-    "480p": "480p",
-    "Audio Only (MP3)": "audio",
-}
-_LABEL_BY_KEY: dict[str, str] = {v: k for k, v in FORMAT_LABELS.items()}
+# Labels live in download.py beside FORMAT_PRESETS so the preset keys have one
+# source of truth; this is just the reverse lookup the widgets need.
+_KEY_BY_LABEL: dict[str, str] = {label: key for key, label in FORMAT_LABELS.items()}
 
 _MAX_THUMB_BYTES = 5 * 1024 * 1024  # 5 MB safety limit for thumbnail downloads
 _THUMB_TIMEOUT = 5  # seconds; short so Cancel is not blocked for long
@@ -295,7 +294,7 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # TTK styles
     # ------------------------------------------------------------------
-    def _apply_styles(self) -> None:
+    def _apply_styles(self) -> None:  # pragma: no cover — ttk theme wiring
         style = ttk.Style(self)
         style.theme_use("default")
         style.configure(
@@ -326,7 +325,7 @@ class App(tk.Tk):
     # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
-    def _build_ui(self) -> None:
+    def _build_ui(self) -> None:  # pragma: no cover — 385 lines of pack() calls
         pad = 20
 
         # ── Header ────────────────────────────────────────────────────
@@ -455,7 +454,7 @@ class App(tk.Tk):
         self.format_combo = ttk.Combobox(
             fmt_row,
             textvariable=self.format_var,
-            values=list(FORMAT_LABELS.keys()),
+            values=list(FORMAT_LABELS.values()),
             state="readonly",
             width=20,
             style="Dark.TCombobox",
@@ -720,7 +719,7 @@ class App(tk.Tk):
         cfg = self._cfg
         if cfg.get("output_dir"):
             self.dir_var.set(cfg["output_dir"])
-        self.format_var.set(_LABEL_BY_KEY.get(cfg.get("format", "best"), "Best Quality"))
+        self.format_var.set(FORMAT_LABELS.get(cfg.get("format", "best"), FORMAT_LABELS["best"]))
         self.sub_var.set(bool(cfg.get("subtitles", False)))
         self.sponsor_var.set(bool(cfg.get("sponsorblock", False)))
         self.playlist_var.set(bool(cfg.get("playlist", False)))
@@ -730,7 +729,7 @@ class App(tk.Tk):
         ok = save_config(
             {
                 "output_dir": self.dir_var.get().strip(),
-                "format": FORMAT_LABELS.get(self.format_var.get(), "best"),
+                "format": _KEY_BY_LABEL.get(self.format_var.get(), "best"),
                 "subtitles": self.sub_var.get(),
                 "sponsorblock": self.sponsor_var.get(),
                 "playlist": self.playlist_var.get(),
@@ -1056,7 +1055,7 @@ class App(tk.Tk):
 
         # ffmpeg is required for video formats (merge video+audio streams)
         # and for audio extraction (FFmpegExtractAudio postprocessor)
-        if not shutil.which("ffmpeg"):
+        if not has_ffmpeg():
             messagebox.showwarning(
                 "ffmpeg Not Found",
                 "ffmpeg is required but was not found on your PATH.\n"
@@ -1076,7 +1075,7 @@ class App(tk.Tk):
         output_dir = self.dir_var.get().strip() or os.path.join(
             os.path.expanduser("~"), "Downloads", "YouTube"
         )
-        format_key = FORMAT_LABELS.get(self.format_var.get(), "best")
+        format_key = _KEY_BY_LABEL.get(self.format_var.get(), "best")
         subtitles = self.sub_var.get()
         sponsorblock = self.sponsor_var.get()
         playlist = self.playlist_var.get()
@@ -1153,18 +1152,7 @@ class App(tk.Tk):
 
                     # Determine stream type so the UI can distinguish the
                     # separate video / audio downloads of a DASH format pair.
-                    vcodec = str(info.get("vcodec", "none"))
-                    acodec = str(info.get("acodec", "none"))
-                    has_video = vcodec != "none"
-                    has_audio = acodec != "none"
-                    if has_video and has_audio:
-                        stream_type = "combined"
-                    elif has_video:
-                        stream_type = "video"
-                    elif has_audio:
-                        stream_type = "audio"
-                    else:
-                        stream_type = "media"
+                    stream_type = classify_stream_type(info)
 
                     snap: dict[str, Any] = {
                         "status": d.get("status"),
@@ -1282,10 +1270,7 @@ class App(tk.Tk):
                                 if self._cancel_event.is_set():
                                     raise DownloadError("Cancelled by user")
 
-                                if info.get("_type") in ("playlist", "multi_video"):
-                                    ydl.download([url])
-                                else:
-                                    ydl.process_info(info)  # type: ignore[arg-type]
+                                extract_and_download(ydl, url, info)
 
                         success_count += 1
                         last_title = title
@@ -1435,16 +1420,32 @@ def _acquire_instance_lock() -> io.TextIOWrapper | None:
         return None
 
 
-if __name__ == "__main__":
-    _lock = _acquire_instance_lock()
-    if _lock is None:
-        _root = tk.Tk()
-        _root.withdraw()
+def main() -> None:
+    """Entry point for the ``yt-downloader-gui`` console script.
+
+    The lock handle is deliberately kept alive for the process lifetime: the
+    advisory lock is released when the file object is closed.
+    """
+    lock = _acquire_instance_lock()
+    if lock is None:
+        root = tk.Tk()
+        root.withdraw()
         messagebox.showinfo(
             "Already Running",
             "Another instance of YouTube Downloader is already running.",
         )
-        _root.destroy()
+        root.destroy()
         sys.exit(0)
-    app = App()
-    app.mainloop()
+    try:
+        App().mainloop()
+    finally:
+        # Release the advisory lock and remove the file so a stale lock does
+        # not linger in the data directory after a crash.
+        with contextlib.suppress(OSError):
+            lock.close()
+        with contextlib.suppress(OSError):
+            os.remove(_LOCK_FILE)
+
+
+if __name__ == "__main__":
+    main()

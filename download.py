@@ -1,9 +1,11 @@
+import argparse
 import functools
 import importlib.util
 import os
 import re
 import shutil
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 import yt_dlp
@@ -96,14 +98,12 @@ def describe_ejs_status() -> str:
     remote = _default_remote_components()
     if remote and runtime != "none":
         return f"EJS solver: remote ({', '.join(remote)}) | JS runtime: {runtime}"
-    if remote:
-        return (
-            f"EJS solver: remote ({', '.join(remote)}) | JS runtime: none "
-            "— install deno (https://deno.com) for reliable YouTube downloads"
-        )
+    # No third branch: _default_remote_components() returns [] only when the
+    # bundled package is present, and that case already returned above — so
+    # `remote` is always non-empty here.
     return (
-        "EJS solver: NOT CONFIGURED — run "
-        '`pip install -U "yt-dlp[default]"` or install deno + allow remote components'
+        f"EJS solver: remote ({', '.join(remote)}) | JS runtime: none "
+        "— install deno (https://deno.com) for reliable YouTube downloads"
     )
 
 
@@ -155,6 +155,63 @@ FORMAT_PRESETS: dict[str, str] = {
     "480p": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best",
     "audio": "bestaudio[ext=m4a]/bestaudio",
 }
+
+# Display names for the presets above.  Kept here rather than in gui.py so the
+# keys have a single source of truth — see test_labels_and_presets_agree.
+# Insertion order drives the order of the GUI's quality dropdown.
+FORMAT_LABELS: dict[str, str] = {
+    "best": "Best Quality",
+    "1080p": "1080p",
+    "720p": "720p",
+    "480p": "480p",
+    "audio": "Audio Only (MP3)",
+}
+
+
+@functools.lru_cache(maxsize=1)
+def has_ffmpeg() -> bool:
+    """Return True if ffmpeg is on PATH.
+
+    Every non-trivial path needs it: DASH video+audio merging, the +faststart
+    remux, SponsorBlock chapter removal, and MP3 extraction.  Checking up front
+    turns a failure that used to happen *after* a full download into an
+    immediate, actionable message.
+    """
+    return shutil.which("ffmpeg") is not None
+
+
+def classify_stream_type(info: Mapping[str, Any]) -> str:
+    """Classify a yt-dlp info dict as video / audio / combined / media.
+
+    yt-dlp reports absent codecs as the literal string ``"none"``, not ``None``.
+    Used to tell the two halves of a DASH video+audio pair apart in progress
+    reporting.
+    """
+    has_video = str(info.get("vcodec", "none")) != "none"
+    has_audio = str(info.get("acodec", "none")) != "none"
+    if has_video and has_audio:
+        return "combined"
+    if has_video:
+        return "video"
+    if has_audio:
+        return "audio"
+    return "media"
+
+
+def extract_and_download(ydl: Any, url: str, info: dict[str, Any]) -> None:
+    """Download *url* from already-extracted *info*.
+
+    Playlists go through ``download()`` for full entry handling; a single video
+    reuses the info we already have via ``process_info()`` so yt-dlp does not
+    fetch the page a second time.
+
+    Shared by the CLI and the GUI: the two previously carried separate copies of
+    this branch and had already drifted apart.
+    """
+    if info.get("_type") in ("playlist", "multi_video"):
+        ydl.download([url])
+    else:
+        ydl.process_info(info)
 
 
 def build_ydl_opts(
@@ -298,11 +355,26 @@ def get_ydl_version() -> str:
     return str(ver)
 
 
-def download_video(url: str, output_dir: str = "downloads") -> None:
+def download_video(
+    url: str,
+    output_dir: str = "downloads",
+    format_preset: str = "best",
+    subtitles: bool = False,
+    sponsorblock: bool = False,
+    playlist: bool = False,
+    prefer_direct_formats: bool = False,
+) -> None:
     """Download a YouTube video to *output_dir*."""
     os.makedirs(output_dir, exist_ok=True)
 
-    ydl_opts = build_ydl_opts(output_dir)
+    ydl_opts = build_ydl_opts(
+        output_dir,
+        format_preset=format_preset,
+        subtitles=subtitles,
+        sponsorblock=sponsorblock,
+        playlist=playlist,
+        prefer_direct_formats=prefer_direct_formats,
+    )
 
     if not ydl_opts.get("cookiesfrombrowser"):
         print("Warning: No browser cookies found. Download may be blocked by YouTube.")
@@ -320,13 +392,7 @@ def download_video(url: str, output_dir: str = "downloads") -> None:
         print(f"Duration : {mins}m {secs}s")
         print(f"Saving to: {os.path.abspath(output_dir)}\n")
 
-        if info.get("_type") in ("playlist", "multi_video"):
-            # Playlist: use download() for full entry handling
-            ydl.download([url])
-        else:
-            # Single video: reuse the already-extracted info so yt-dlp
-            # does not re-fetch the YouTube page a second time.
-            ydl.process_info(info)  # type: ignore[arg-type]
+        extract_and_download(ydl, url, info)
 
     print("\nDownload complete!")
 
@@ -350,17 +416,66 @@ def _cli_progress_hook(d: dict[str, Any]) -> None:
         )
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build the CLI parser.
+
+    Separate from main() so tests can exercise parsing without running a
+    download.
+    """
+    parser = argparse.ArgumentParser(
+        prog="yt-downloader",
+        description="Download YouTube videos and playlists via yt-dlp.",
+    )
+    parser.add_argument("url", nargs="?", help="YouTube URL (prompted for if omitted)")
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        default=None,
+        help="Save folder (default: ./downloads)",
+    )
+    parser.add_argument(
+        "-f",
+        "--format",
+        dest="format_preset",
+        default="best",
+        choices=sorted(FORMAT_PRESETS),
+        help="Quality preset (default: best)",
+    )
+    parser.add_argument("--subtitles", action="store_true", help="Download EN/AR subtitles")
+    parser.add_argument("--sponsorblock", action="store_true", help="Strip sponsor segments")
+    parser.add_argument("--playlist", action="store_true", help="Download the whole playlist")
+    parser.add_argument(
+        "--prefer-direct",
+        dest="prefer_direct_formats",
+        action="store_true",
+        help="Prefer direct HTTP formats over segmented transports",
+    )
+    return parser
+
+
+def _prompt(message: str, default: str = "") -> str:
+    """Prompt on an interactive terminal; fall back to *default* otherwise.
+
+    Guarding on isatty keeps piped and scripted invocations from dying with an
+    uncaught EOFError.
+    """
+    if not sys.stdin or not sys.stdin.isatty():
+        return default
+    try:
+        return input(message).strip() or default
+    except EOFError:
+        return default
+
+
+def main(argv: list[str] | None = None) -> None:
+    args = build_arg_parser().parse_args(argv)
+
     print("=" * 50)
     print("       YouTube Video Downloader (yt-dlp)")
     print("=" * 50)
     print(describe_ejs_status())
 
-    if len(sys.argv) > 1:
-        url = sys.argv[1].strip()
-    else:
-        url = input("\nPaste YouTube URL: ").strip()
-
+    url = (args.url or _prompt("\nPaste YouTube URL: ")).strip()
     if not url:
         print("No URL provided. Exiting.")
         sys.exit(1)
@@ -369,16 +484,39 @@ def main() -> None:
         print("Error: That doesn't look like a YouTube URL.")
         sys.exit(1)
 
-    output_dir = input("Save folder [press Enter for 'downloads']: ").strip() or "downloads"
+    if not has_ffmpeg():
+        print(
+            "Error: ffmpeg was not found on PATH.\n"
+            "It is required to merge video+audio, extract MP3, and strip sponsor\n"
+            "segments. Install it from https://ffmpeg.org/download.html and retry."
+        )
+        sys.exit(1)
+
+    output_dir = args.output_dir or _prompt(
+        "Save folder [press Enter for 'downloads']: ", "downloads"
+    )
 
     try:
-        download_video(url, output_dir)
+        download_video(
+            url,
+            output_dir,
+            format_preset=args.format_preset,
+            subtitles=args.subtitles,
+            sponsorblock=args.sponsorblock,
+            playlist=args.playlist,
+            prefer_direct_formats=args.prefer_direct_formats,
+        )
     except DownloadError as e:
         print(f"\nDownload error: {e}")
         sys.exit(1)
+    except OSError as e:
+        print(f"\nCannot write to '{output_dir}': {e}")
+        sys.exit(1)
     except KeyboardInterrupt:
+        # 130 = terminated by SIGINT.  Exiting 0 here reported success for an
+        # aborted download, which broke any script checking the status.
         print("\nCancelled by user.")
-        sys.exit(0)
+        sys.exit(130)
 
 
 if __name__ == "__main__":
