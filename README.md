@@ -104,7 +104,7 @@ Settings are auto-saved to `.yt_config.json` under the app's platform-specific d
 | `subtitles`   | `false`                        | Download subtitles                 |
 | `sponsorblock`| `false`                        | Remove sponsor segments            |
 | `playlist`    | `false`                        | Download full playlist             |
-| `prefer_direct_formats` | `true`               | Prefer direct HTTP formats when available |
+| `prefer_direct_formats` | `false`              | Prefer direct HTTP formats when available |
 
 ## License
 

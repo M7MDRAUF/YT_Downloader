@@ -1,4 +1,5 @@
 import contextlib
+import csv
 import datetime
 import io
 import ipaddress
@@ -11,6 +12,7 @@ import sys
 import threading
 import time
 import tkinter as tk
+from collections.abc import Iterator
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 from urllib.parse import urlparse
@@ -131,6 +133,7 @@ FORMAT_LABELS: dict[str, str] = {
 _LABEL_BY_KEY: dict[str, str] = {v: k for k, v in FORMAT_LABELS.items()}
 
 _MAX_THUMB_BYTES = 5 * 1024 * 1024  # 5 MB safety limit for thumbnail downloads
+_THUMB_TIMEOUT = 5  # seconds; short so Cancel is not blocked for long
 
 _UNSAFE_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0"})  # noqa: S104 — blocklist, not a binding
 
@@ -191,12 +194,60 @@ def save_history(history: list[dict[str, str]]) -> bool:
         return False
 
 
+_HISTORY_CSV_HEADER = ["time", "title", "path", "status"]
+
+
+def history_csv_rows(history: list[dict[str, str]]) -> list[list[str]]:
+    """Return *history* as CSV rows, header first."""
+    rows = [list(_HISTORY_CSV_HEADER)]
+    for item in history:
+        rows.append(
+            [
+                item.get("time", ""),
+                item.get("title", ""),
+                item.get("path", ""),
+                item.get("status", "success"),
+            ]
+        )
+    return rows
+
+
 def _make_card(parent: tk.Misc) -> tuple[tk.Frame, tk.Frame]:
     """Bordered card: returns (outer_border_frame, inner_content_frame)."""
     outer = tk.Frame(parent, bg=BORDER, bd=0)
     inner = tk.Frame(outer, bg=BG_CARD, bd=0)
     inner.pack(padx=1, pady=1, fill="both", expand=True)
     return outer, inner
+
+
+@contextlib.contextmanager
+def _track_child_processes(sink: set[Any], lock: threading.Lock | None = None) -> Iterator[None]:
+    """Register every ``Popen`` created inside the block into *sink*.
+
+    yt-dlp spawns ffmpeg via :class:`subprocess.Popen`; tracking those handles
+    lets the app terminate them on window close instead of orphaning them.
+
+    Binding and restoring the patch inside a single context manager keeps the
+    two structurally inseparable — an earlier version bound the original inside
+    a ``try`` whose ``finally`` restored it, so any exception raised before the
+    binding turned into an ``UnboundLocalError`` that killed the worker thread
+    and left the UI permanently disabled.
+    """
+    original = subprocess.Popen.__init__
+
+    def tracking(popen_self: Any, *args: Any, **kwargs: Any) -> None:
+        original(popen_self, *args, **kwargs)
+        if lock is not None:
+            with lock:
+                sink.add(popen_self)
+        else:
+            sink.add(popen_self)
+
+    subprocess.Popen.__init__ = tracking  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        subprocess.Popen.__init__ = original  # type: ignore[method-assign]
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +270,10 @@ class App(tk.Tk):
         self._progress_determinate: bool = False
         self._close_retries: int = 0
         self._child_procs: set[subprocess.Popen[bytes]] = set()
+        # Guards _child_procs: yt-dlp's ffmpeg thread adds while the main
+        # thread drains it on close.
+        self._procs_lock = threading.Lock()
+        self._destroyed = False
 
         self._cfg = load_config()
         self._apply_styles()
@@ -702,8 +757,15 @@ class App(tk.Tk):
     # Helpers
     # ------------------------------------------------------------------
     def _safe_after(self, ms: int, func: Any, *args: Any) -> None:
-        """Like self.after() but silently ignores calls on a destroyed widget."""
-        with contextlib.suppress(Exception):
+        """Like self.after() but ignores calls on an already-destroyed widget.
+
+        Only the two exceptions a torn-down interpreter actually raises are
+        suppressed — a blanket ``except Exception`` here would silently swallow
+        genuine Tcl threading bugs and the UI would just stop updating.
+        """
+        if self._destroyed:
+            return
+        with contextlib.suppress(RuntimeError, tk.TclError):
             self.after(ms, func, *args)
 
     def _center(self) -> None:
@@ -721,15 +783,20 @@ class App(tk.Tk):
         """
         if self._download_active:
             self._cancel_event.set()
-            # Terminate tracked ffmpeg subprocesses to avoid orphans
-            for proc in list(self._child_procs):
+            # Terminate tracked ffmpeg subprocesses to avoid orphans.  Drain
+            # under the lock: a plain list()+clear() loses any process the
+            # worker thread registers between the two statements.
+            with self._procs_lock:
+                pending = list(self._child_procs)
+                self._child_procs.clear()
+            for proc in pending:
                 with contextlib.suppress(OSError):
                     proc.terminate()
-            self._child_procs.clear()
             self._close_retries += 1
             if self._close_retries < 25:
                 self.after(200, self._on_closing)
                 return
+        self._destroyed = True
         self.destroy()
 
     def _set_status(self, msg: str, state: str = "idle") -> None:
@@ -844,25 +911,35 @@ class App(tk.Tk):
         )
         if not path:
             return
-        import csv
-
-        with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
-            writer.writerow(["time", "title", "path", "status"])
-            for item in self._history:
-                writer.writerow(
-                    [
-                        item.get("time", ""),
-                        item.get("title", ""),
-                        item.get("path", ""),
-                        item.get("status", "success"),
-                    ]
-                )
+        try:
+            with open(path, "w", newline="", encoding="utf-8") as f:
+                csv.writer(f).writerows(history_csv_rows(self._history))
+        except OSError as exc:
+            # Without this the traceback escapes the Tk callback and is
+            # invisible under pythonw, where there is no stderr at all.
+            self._set_status(f"Could not write CSV: {exc}", "error")
+            return
         self._set_status(f"History exported to {os.path.basename(path)}", "success")
 
     # ------------------------------------------------------------------
     # Thumbnail
     # ------------------------------------------------------------------
+    def _maybe_show_thumbnail(self, thumb_url: str, title: str) -> None:
+        """Fetch and show the video thumbnail; a failure here is never fatal.
+
+        Guarded by _is_safe_url() so a hostile thumbnail URL cannot be used to
+        reach localhost or private ranges, and capped at _MAX_THUMB_BYTES.
+        """
+        if not (thumb_url and _ensure_pil() and _is_safe_url(thumb_url)):
+            return
+        try:
+            req = Request(thumb_url, headers={"User-Agent": "Mozilla/5.0"})  # noqa: S310
+            with urlopen(req, timeout=_THUMB_TIMEOUT) as resp:  # noqa: S310
+                thumb_data = resp.read(_MAX_THUMB_BYTES)
+        except Exception:  # thumbnails are decorative — fail soft
+            return
+        self._safe_after(0, self._display_thumbnail, thumb_data, title)
+
     def _display_thumbnail(self, data: bytes, title: str) -> None:
         if not _ensure_pil():
             return
@@ -1045,245 +1122,224 @@ class App(tk.Tk):
     ) -> None:
         try:
             os.makedirs(output_dir, exist_ok=True)
+        except OSError as exc:
+            self._safe_after(0, self._on_error, f"Cannot create folder: {exc}")
+            self._safe_after(0, self._reset_ui)
+            return
 
-            # Track subprocesses spawned by yt-dlp (ffmpeg) so we can kill
-            # them on window close instead of leaving orphaned processes.
-            _original_popen_init = subprocess.Popen.__init__
+        # Track ffmpeg subprocesses so we can terminate them on window close.
+        try:
+            with _track_child_processes(self._child_procs, self._procs_lock):
+                success_count = 0
+                error_count = 0
+                last_title = "Unknown"
 
-            def _tracking_popen_init(popen_self: Any, *args: Any, **kwargs: Any) -> None:
-                _original_popen_init(popen_self, *args, **kwargs)
-                self._child_procs.add(popen_self)
+                _last_hook_time = 0.0
+                _current_queue_idx = 0
+                _ansi_sub = _ANSI_RE.sub  # local ref avoids attribute lookup per call
 
-            subprocess.Popen.__init__ = _tracking_popen_init  # type: ignore[assignment]
+                def gui_hook(d: dict[str, Any]) -> None:
+                    nonlocal _last_hook_time
+                    if self._cancel_event.is_set():
+                        raise DownloadError("Cancelled by user")
+                    # Throttle UI updates to ~5/sec; always forward "finished" status
+                    now = time.monotonic()
+                    if d.get("status") != "finished" and (now - _last_hook_time) < 0.2:
+                        return
+                    _last_hook_time = now
+                    # Extract only needed fields — avoids holding a ref to the
+                    # large, mutable info_dict that yt-dlp may recycle.
+                    info: dict[str, Any] = d.get("info_dict") or {}
 
-            success_count = 0
-            error_count = 0
-            last_title = "Unknown"
-
-            _last_hook_time = 0.0
-            _current_queue_idx = 0
-            _ansi_sub = _ANSI_RE.sub  # local ref avoids attribute lookup per call
-
-            def gui_hook(d: dict[str, Any]) -> None:
-                nonlocal _last_hook_time
-                if self._cancel_event.is_set():
-                    raise DownloadError("Cancelled by user")
-                # Throttle UI updates to ~5/sec; always forward "finished" status
-                now = time.monotonic()
-                if d.get("status") != "finished" and (now - _last_hook_time) < 0.2:
-                    return
-                _last_hook_time = now
-                # Extract only needed fields — avoids holding a ref to the
-                # large, mutable info_dict that yt-dlp may recycle.
-                info: dict[str, Any] = d.get("info_dict") or {}
-
-                # Determine stream type so the UI can distinguish the
-                # separate video / audio downloads of a DASH format pair.
-                vcodec = str(info.get("vcodec", "none"))
-                acodec = str(info.get("acodec", "none"))
-                has_video = vcodec != "none"
-                has_audio = acodec != "none"
-                if has_video and has_audio:
-                    stream_type = "combined"
-                elif has_video:
-                    stream_type = "video"
-                elif has_audio:
-                    stream_type = "audio"
-                else:
-                    stream_type = "media"
-
-                snap: dict[str, Any] = {
-                    "status": d.get("status"),
-                    "total_bytes": d.get("total_bytes"),
-                    "total_bytes_estimate": d.get("total_bytes_estimate"),
-                    "downloaded_bytes": d.get("downloaded_bytes", 0),
-                    "_speed_str": _ansi_sub("", str(d.get("_speed_str", ""))),
-                    "_eta_str": _ansi_sub("", str(d.get("_eta_str", ""))),
-                    "_percent_str": _ansi_sub("", str(d.get("_percent_str", ""))),
-                    "_queue_index": _current_queue_idx,
-                    "_stream_type": stream_type,
-                    "info_dict": {
-                        "playlist_index": info.get("playlist_index"),
-                        "playlist_autonumber": info.get("playlist_autonumber"),
-                        "n_entries": info.get("n_entries"),
-                        "playlist_count": info.get("playlist_count"),
-                    },
-                }
-                self._safe_after(0, self._update_progress, snap)
-
-            def pp_hook(d: dict[str, Any]) -> None:
-                """Check cancel during post-processing (ffmpeg merge, audio extract, etc.)."""
-                if self._cancel_event.is_set():
-                    raise DownloadError("Cancelled by user")
-                status = d.get("status", "")
-                if status == "started":
-                    self._safe_after(
-                        0,
-                        self._set_status,
-                        f"Post-processing: {d.get('postprocessor', 'ffmpeg')}\u2026",
-                        "loading",
-                    )
-
-            for i, url in enumerate(urls, 1):
-                if self._cancel_event.is_set():
-                    break
-
-                _current_queue_idx = i
-                self._safe_after(0, self._reset_progress_for_url)
-
-                if self._queue_total > 1:
-                    self._safe_after(
-                        0,
-                        self._set_status,
-                        f"Fetching info \u2014 URL {i} / {len(urls)}\u2026",
-                        "loading",
-                    )
-                else:
-                    self._safe_after(0, self._set_status, "Fetching info\u2026", "loading")
-
-                try:
-                    opts = build_ydl_opts(
-                        output_dir=output_dir,
-                        progress_hooks=[gui_hook],
-                        postprocessor_hooks=[pp_hook],
-                        quiet=True,
-                        format_preset=format_key,
-                        subtitles=subtitles,
-                        sponsorblock=sponsorblock,
-                        playlist=playlist,
-                        prefer_direct_formats=prefer_direct_formats,
-                    )
-
-                    if playlist:
-                        # Playlist mode: use extract_flat for metadata.
-                        # Full extract_info resolves every entry (~2 s each),
-                        # blocking for minutes on large playlists and hanging
-                        # on infinite YouTube Mix/Radio lists (list=RD…).
-                        # extract_flat with playlistend=1 returns the playlist
-                        # title + thumbnail in ~1-2 s without resolving entries.
-                        flat_opts = dict(opts)
-                        flat_opts["extract_flat"] = "in_playlist"
-                        flat_opts["playlistend"] = 1  # only need playlist-level metadata
-                        with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:  # type: ignore[arg-type]
-                            raw = flat_ydl.extract_info(url, download=False)
-                        if not raw:
-                            raise DownloadError("Could not extract playlist information")
-                        info: dict[str, Any] = dict(raw)
-                        title = str(info.get("title", "Unknown"))
-                        thumb_url = info.get("thumbnail", "")
-
-                        if self._cancel_event.is_set():
-                            raise DownloadError("Cancelled by user")
-
-                        if thumb_url and _ensure_pil() and _is_safe_url(thumb_url):
-                            try:
-                                req = Request(  # noqa: S310
-                                    thumb_url, headers={"User-Agent": "Mozilla/5.0"}
-                                )
-                                with urlopen(req, timeout=10) as resp:  # noqa: S310
-                                    thumb_data = resp.read(_MAX_THUMB_BYTES)
-                                self._safe_after(0, self._display_thumbnail, thumb_data, title)
-                            except Exception:  # noqa: S110
-                                pass
-
-                        if self._cancel_event.is_set():
-                            raise DownloadError("Cancelled by user")
-
-                        # Download: yt-dlp resolves entries lazily via
-                        # playlistend + lazy_playlist already in opts.
-                        with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
-                            ydl.download([url])
-
+                    # Determine stream type so the UI can distinguish the
+                    # separate video / audio downloads of a DASH format pair.
+                    vcodec = str(info.get("vcodec", "none"))
+                    acodec = str(info.get("acodec", "none"))
+                    has_video = vcodec != "none"
+                    has_audio = acodec != "none"
+                    if has_video and has_audio:
+                        stream_type = "combined"
+                    elif has_video:
+                        stream_type = "video"
+                    elif has_audio:
+                        stream_type = "audio"
                     else:
-                        # Single video: full extract_info is fast (one page).
-                        # Reuse the extracted info via process_info to avoid
-                        # a redundant second page fetch.
-                        with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
-                            raw = ydl.extract_info(url, download=False)
+                        stream_type = "media"
+
+                    snap: dict[str, Any] = {
+                        "status": d.get("status"),
+                        "total_bytes": d.get("total_bytes"),
+                        "total_bytes_estimate": d.get("total_bytes_estimate"),
+                        "downloaded_bytes": d.get("downloaded_bytes", 0),
+                        "_speed_str": _ansi_sub("", str(d.get("_speed_str", ""))),
+                        "_eta_str": _ansi_sub("", str(d.get("_eta_str", ""))),
+                        "_percent_str": _ansi_sub("", str(d.get("_percent_str", ""))),
+                        "_queue_index": _current_queue_idx,
+                        "_stream_type": stream_type,
+                        "info_dict": {
+                            "playlist_index": info.get("playlist_index"),
+                            "playlist_autonumber": info.get("playlist_autonumber"),
+                            "n_entries": info.get("n_entries"),
+                            "playlist_count": info.get("playlist_count"),
+                        },
+                    }
+                    self._safe_after(0, self._update_progress, snap)
+
+                def pp_hook(d: dict[str, Any]) -> None:
+                    """Check cancel during post-processing (ffmpeg merge, audio extract, etc.)."""
+                    if self._cancel_event.is_set():
+                        raise DownloadError("Cancelled by user")
+                    status = d.get("status", "")
+                    if status == "started":
+                        self._safe_after(
+                            0,
+                            self._set_status,
+                            f"Post-processing: {d.get('postprocessor', 'ffmpeg')}\u2026",
+                            "loading",
+                        )
+
+                for i, url in enumerate(urls, 1):
+                    if self._cancel_event.is_set():
+                        break
+
+                    _current_queue_idx = i
+                    self._safe_after(0, self._reset_progress_for_url)
+
+                    if self._queue_total > 1:
+                        self._safe_after(
+                            0,
+                            self._set_status,
+                            f"Fetching info \u2014 URL {i} / {len(urls)}\u2026",
+                            "loading",
+                        )
+                    else:
+                        self._safe_after(0, self._set_status, "Fetching info\u2026", "loading")
+
+                    try:
+                        opts = build_ydl_opts(
+                            output_dir=output_dir,
+                            progress_hooks=[gui_hook],
+                            postprocessor_hooks=[pp_hook],
+                            quiet=True,
+                            format_preset=format_key,
+                            subtitles=subtitles,
+                            sponsorblock=sponsorblock,
+                            playlist=playlist,
+                            prefer_direct_formats=prefer_direct_formats,
+                        )
+
+                        if playlist:
+                            # Playlist mode: use extract_flat for metadata.
+                            # Full extract_info resolves every entry (~2 s each),
+                            # blocking for minutes on large playlists and hanging
+                            # on infinite YouTube Mix/Radio lists (list=RD…).
+                            # extract_flat with playlistend=1 returns the playlist
+                            # title + thumbnail in ~1-2 s without resolving entries.
+                            flat_opts = dict(opts)
+                            flat_opts["extract_flat"] = "in_playlist"
+                            flat_opts["playlistend"] = 1  # only need playlist-level metadata
+                            with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:  # type: ignore[arg-type]
+                                raw = flat_ydl.extract_info(url, download=False)
                             if not raw:
-                                raise DownloadError("Could not extract video information")
-                            info = dict(raw)
+                                raise DownloadError("Could not extract playlist information")
+                            info: dict[str, Any] = dict(raw)
                             title = str(info.get("title", "Unknown"))
                             thumb_url = info.get("thumbnail", "")
 
                             if self._cancel_event.is_set():
                                 raise DownloadError("Cancelled by user")
 
-                            if thumb_url and _ensure_pil() and _is_safe_url(thumb_url):
-                                try:
-                                    req = Request(  # noqa: S310
-                                        thumb_url, headers={"User-Agent": "Mozilla/5.0"}
-                                    )
-                                    with urlopen(req, timeout=10) as resp:  # noqa: S310
-                                        thumb_data = resp.read(_MAX_THUMB_BYTES)
-                                    self._safe_after(0, self._display_thumbnail, thumb_data, title)
-                                except Exception:  # noqa: S110
-                                    pass
-
-                            if not info.get("formats") and not info.get("url"):
-                                raise DownloadError(f"No downloadable formats for: {title}")
+                            self._maybe_show_thumbnail(thumb_url, title)
 
                             if self._cancel_event.is_set():
                                 raise DownloadError("Cancelled by user")
 
-                            if info.get("_type") in ("playlist", "multi_video"):
+                            # Download: yt-dlp resolves entries lazily via
+                            # playlistend + lazy_playlist already in opts.
+                            with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
                                 ydl.download([url])
-                            else:
-                                ydl.process_info(info)  # type: ignore[arg-type]
 
-                    success_count += 1
-                    last_title = title
-                    self._safe_after(0, self._add_history, title, output_dir, "success")
+                        else:
+                            # Single video: full extract_info is fast (one page).
+                            # Reuse the extracted info via process_info to avoid
+                            # a redundant second page fetch.
+                            with yt_dlp.YoutubeDL(opts) as ydl:  # type: ignore[arg-type]
+                                raw = ydl.extract_info(url, download=False)
+                                if not raw:
+                                    raise DownloadError("Could not extract video information")
+                                info = dict(raw)
+                                title = str(info.get("title", "Unknown"))
+                                thumb_url = info.get("thumbnail", "")
 
-                except DownloadError as e:
-                    if "Cancelled" in str(e) or self._cancel_event.is_set():
-                        self._safe_after(0, self._on_error, "Cancelled by user")
-                        return
-                    error_count += 1
-                    err_msg = _ANSI_RE.sub("", str(e))[:300]
+                                if self._cancel_event.is_set():
+                                    raise DownloadError("Cancelled by user")
+
+                                self._maybe_show_thumbnail(thumb_url, title)
+
+                                if not info.get("formats") and not info.get("url"):
+                                    raise DownloadError(f"No downloadable formats for: {title}")
+
+                                if self._cancel_event.is_set():
+                                    raise DownloadError("Cancelled by user")
+
+                                if info.get("_type") in ("playlist", "multi_video"):
+                                    ydl.download([url])
+                                else:
+                                    ydl.process_info(info)  # type: ignore[arg-type]
+
+                        success_count += 1
+                        last_title = title
+                        self._safe_after(0, self._add_history, title, output_dir, "success")
+
+                    except DownloadError as e:
+                        if "Cancelled" in str(e) or self._cancel_event.is_set():
+                            self._safe_after(0, self._on_error, "Cancelled by user")
+                            return
+                        error_count += 1
+                        err_msg = _ANSI_RE.sub("", str(e))[:300]
+                        self._safe_after(
+                            0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
+                        )
+                    except Exception as e:
+                        if self._cancel_event.is_set():
+                            self._safe_after(0, self._on_error, "Cancelled by user")
+                            return
+                        error_count += 1
+                        err_msg = _ANSI_RE.sub("", str(e))[:300]
+                        self._safe_after(
+                            0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
+                        )
+
+                # All URLs processed — report accurate outcome
+                if self._cancel_event.is_set() and success_count == 0:
+                    self._safe_after(0, self._on_error, "Cancelled by user")
+                elif self._cancel_event.is_set() and success_count > 0:
                     self._safe_after(
-                        0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
+                        0,
+                        self._on_partial,
+                        output_dir,
+                        last_title,
+                        f"{success_count} succeeded before cancellation",
                     )
-                except Exception as e:
-                    if self._cancel_event.is_set():
-                        self._safe_after(0, self._on_error, "Cancelled by user")
-                        return
-                    error_count += 1
-                    err_msg = _ANSI_RE.sub("", str(e))[:300]
+                elif error_count == 0:
+                    self._safe_after(0, self._on_success, output_dir, last_title, success_count)
+                elif success_count > 0:
                     self._safe_after(
-                        0, self._add_history, f"Failed: {err_msg}", output_dir, "error"
+                        0,
+                        self._on_partial,
+                        output_dir,
+                        last_title,
+                        f"{success_count} succeeded, {error_count} failed",
                     )
-
-            # All URLs processed — report accurate outcome
-            if self._cancel_event.is_set() and success_count == 0:
-                self._safe_after(0, self._on_error, "Cancelled by user")
-            elif self._cancel_event.is_set() and success_count > 0:
-                self._safe_after(
-                    0,
-                    self._on_partial,
-                    output_dir,
-                    last_title,
-                    f"{success_count} succeeded before cancellation",
-                )
-            elif error_count == 0:
-                self._safe_after(0, self._on_success, output_dir, last_title, success_count)
-            elif success_count > 0:
-                self._safe_after(
-                    0,
-                    self._on_partial,
-                    output_dir,
-                    last_title,
-                    f"{success_count} succeeded, {error_count} failed",
-                )
-            else:
-                self._safe_after(0, self._on_error, f"All {error_count} download(s) failed")
+                else:
+                    self._safe_after(0, self._on_error, f"All {error_count} download(s) failed")
         except Exception as exc:
             err_detail = _ANSI_RE.sub("", str(exc))[:300] or "Unexpected error occurred"
             self._safe_after(0, self._on_error, err_detail)
         finally:
-            # Restore original Popen and discard finished process refs
-            subprocess.Popen.__init__ = _original_popen_init  # type: ignore[method-assign]
-            self._child_procs = {p for p in self._child_procs if p.poll() is None}
+            # Discard finished process refs
+            with self._procs_lock:
+                self._child_procs = {p for p in self._child_procs if p.poll() is None}
             self._safe_after(0, self._reset_ui)
 
     # ------------------------------------------------------------------

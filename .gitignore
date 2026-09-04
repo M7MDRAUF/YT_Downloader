@@ -43,6 +43,6 @@ desktop.ini
 htmlcov/
 .coverage
 
-# GitHub config
-.github
-.github/
+# Vendor agent boilerplate — not project convention, and it would be
+# injected into every future agent's context in this repo.
+.github/instructions/

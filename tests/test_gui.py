@@ -1,52 +1,11 @@
 """Tests for gui.py — URL safety, history persistence, helpers."""
 
 import json
-import sys
-import types
 from unittest import mock
 
 import pytest
 
-# Create a minimal tkinter stub so gui.py can be imported without a display
-_tk = types.ModuleType("tkinter")
-_tk.Tk = type("Tk", (), {})  # type: ignore[attr-defined]
-_tk.Frame = type("Frame", (), {})  # type: ignore[attr-defined]
-_tk.Label = type("Label", (), {})  # type: ignore[attr-defined]
-_tk.Misc = type("Misc", (), {})  # type: ignore[attr-defined]
-_tk.StringVar = type("StringVar", (), {})  # type: ignore[attr-defined]
-_tk.BooleanVar = type("BooleanVar", (), {})  # type: ignore[attr-defined]
-_tk.IntVar = type("IntVar", (), {})  # type: ignore[attr-defined]
-_tk.Text = type("Text", (), {})  # type: ignore[attr-defined]
-_tk.Listbox = type("Listbox", (), {})  # type: ignore[attr-defined]
-_tk.Scrollbar = type("Scrollbar", (), {})  # type: ignore[attr-defined]
-_tk.OptionMenu = type("OptionMenu", (), {})  # type: ignore[attr-defined]
-_tk.Checkbutton = type("Checkbutton", (), {})  # type: ignore[attr-defined]
-_tk.Button = type("Button", (), {})  # type: ignore[attr-defined]
-_tk.END = "end"  # type: ignore[attr-defined]
-_tk.NORMAL = "normal"  # type: ignore[attr-defined]
-_tk.DISABLED = "disabled"  # type: ignore[attr-defined]
-_tk.SINGLE = "single"  # type: ignore[attr-defined]
-_tk.X = "x"  # type: ignore[attr-defined]
-_tk.Y = "y"  # type: ignore[attr-defined]
-_tk.BOTH = "both"  # type: ignore[attr-defined]
-_tk.LEFT = "left"  # type: ignore[attr-defined]
-_tk.RIGHT = "right"  # type: ignore[attr-defined]
-_tk.TOP = "top"  # type: ignore[attr-defined]
-_tk.BOTTOM = "bottom"  # type: ignore[attr-defined]
-_tk.W = "w"  # type: ignore[attr-defined]
-_tk.E = "e"  # type: ignore[attr-defined]
-_tk.filedialog = types.ModuleType("tkinter.filedialog")  # type: ignore[attr-defined]
-_tk_ttk = types.ModuleType("tkinter.ttk")
-_tk_ttk.Progressbar = type("Progressbar", (), {})  # type: ignore[attr-defined]
-_tk_messagebox = types.ModuleType("tkinter.messagebox")
-_tk_messagebox.showerror = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
-_tk_messagebox.showinfo = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
-sys.modules["tkinter"] = _tk
-sys.modules["tkinter.filedialog"] = _tk.filedialog  # type: ignore[attr-defined]
-sys.modules["tkinter.ttk"] = _tk_ttk
-sys.modules["tkinter.messagebox"] = _tk_messagebox
-
-import gui  # noqa: E402 — must import after tkinter stub
+import gui  # imported after conftest installs the tkinter stub
 
 
 class TestIsSafeUrl:
