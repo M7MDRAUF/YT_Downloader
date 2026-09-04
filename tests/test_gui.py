@@ -1,6 +1,7 @@
 """Tests for gui.py — URL safety, history persistence, helpers."""
 
 import json
+import pathlib
 import subprocess
 import sys
 import threading
@@ -67,13 +68,13 @@ class TestFormatSpeedLabel:
 class TestLoadHistory:
     """load_history() loads valid entries and survives corruption."""
 
-    def test_returns_empty_when_no_file(self, tmp_path: pytest.TempPathFactory) -> None:
-        fake_path = str(tmp_path / "nonexistent.json")  # type: ignore[operator]
+    def test_returns_empty_when_no_file(self, tmp_path: pathlib.Path) -> None:
+        fake_path = str(tmp_path / "nonexistent.json")
         with mock.patch.object(gui, "HISTORY_FILE", fake_path):
             assert gui.load_history() == []
 
-    def test_loads_valid_entries(self, tmp_path: pytest.TempPathFactory) -> None:
-        path = str(tmp_path / "hist.json")  # type: ignore[operator]
+    def test_loads_valid_entries(self, tmp_path: pathlib.Path) -> None:
+        path = str(tmp_path / "hist.json")
         entries = [{"time": "2024-01-01", "title": "Test", "path": "/tmp", "status": "success"}]
         with open(path, "w", encoding="utf-8") as f:
             json.dump(entries, f)
@@ -82,8 +83,8 @@ class TestLoadHistory:
         assert len(result) == 1
         assert result[0]["title"] == "Test"
 
-    def test_skips_invalid_entries(self, tmp_path: pytest.TempPathFactory) -> None:
-        path = str(tmp_path / "hist.json")  # type: ignore[operator]
+    def test_skips_invalid_entries(self, tmp_path: pathlib.Path) -> None:
+        path = str(tmp_path / "hist.json")
         entries: list[dict[str, str] | str] = [
             {"time": "2024-01-01", "title": "Good", "path": "/tmp", "status": "success"},
             {"bad": "entry"},  # missing required keys
@@ -95,8 +96,8 @@ class TestLoadHistory:
             result = gui.load_history()
         assert len(result) == 1
 
-    def test_survives_corrupt_file(self, tmp_path: pytest.TempPathFactory) -> None:
-        path = str(tmp_path / "hist.json")  # type: ignore[operator]
+    def test_survives_corrupt_file(self, tmp_path: pathlib.Path) -> None:
+        path = str(tmp_path / "hist.json")
         with open(path, "w", encoding="utf-8") as f:
             f.write("{corrupt")
         with mock.patch.object(gui, "HISTORY_FILE", path):
@@ -106,8 +107,8 @@ class TestLoadHistory:
 class TestSaveHistory:
     """save_history() persists entries and caps at 50."""
 
-    def test_saves_and_loads(self, tmp_path: pytest.TempPathFactory) -> None:
-        path = str(tmp_path / "hist.json")  # type: ignore[operator]
+    def test_saves_and_loads(self, tmp_path: pathlib.Path) -> None:
+        path = str(tmp_path / "hist.json")
         entries = [{"time": "2024-01-01", "title": "Test", "path": "/tmp", "status": "success"}]
         with mock.patch.object(gui, "HISTORY_FILE", path):
             assert gui.save_history(entries) is True
@@ -115,8 +116,8 @@ class TestSaveHistory:
             data = json.load(f)
         assert data == entries
 
-    def test_caps_at_50(self, tmp_path: pytest.TempPathFactory) -> None:
-        path = str(tmp_path / "hist.json")  # type: ignore[operator]
+    def test_caps_at_50(self, tmp_path: pathlib.Path) -> None:
+        path = str(tmp_path / "hist.json")
         entries = [
             {"time": f"t{i}", "title": f"v{i}", "path": "/tmp", "status": "success"}
             for i in range(100)
