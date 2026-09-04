@@ -795,3 +795,24 @@ class TestStdoutLenientCoversStderr:
         monkeypatch.setattr(download.sys, "stderr", _Stream("stderr"))
         download._make_stdout_lenient()
         assert seen == ["stdout:replace", "stderr:replace"]
+
+
+class TestQuietImpliesNoProgress:
+    """quiet alone does not stop yt-dlp printing its progress bar."""
+
+    def test_quiet_sets_noprogress(self) -> None:
+        opts = download.build_ydl_opts(quiet=True)
+        assert opts["quiet"] is True
+        assert opts["noprogress"] is True
+
+    def test_not_quiet_leaves_progress_on(self) -> None:
+        opts = download.build_ydl_opts(quiet=False)
+        assert "quiet" not in opts
+        assert "noprogress" not in opts
+
+    def test_yt_dlp_actually_honours_it(self) -> None:
+        """Guard against the yt-dlp default flipping back under us."""
+        import yt_dlp
+
+        ydl = yt_dlp.YoutubeDL(download.build_ydl_opts(quiet=True))  # type: ignore[arg-type]
+        assert ydl.params.get("noprogress") is True

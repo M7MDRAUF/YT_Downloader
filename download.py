@@ -353,6 +353,12 @@ def build_ydl_opts(
 
     if quiet:
         opts["quiet"] = True
+        # quiet does NOT imply noprogress in yt-dlp — the progress bar is
+        # written regardless unless this is set explicitly. Without it the GUI
+        # spews "[download] 42% of 195MiB..." to stdout while showing its own
+        # progress bar, and a non-ASCII title in that output crashes the worker
+        # thread outright when stdout is redirected to a file.
+        opts["noprogress"] = True
     browser = get_cookies_browser()
     if browser:
         opts["cookiesfrombrowser"] = (browser,)

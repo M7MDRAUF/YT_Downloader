@@ -25,6 +25,7 @@ from config import DATA_DIR, atomic_write_json, load_config, save_config
 from download import (
     FORMAT_LABELS,
     DownloadError,
+    _make_stdout_lenient,
     build_ydl_opts,
     classify_stream_type,
     describe_ejs_status,
@@ -1437,6 +1438,11 @@ def main() -> None:
     The lock handle is deliberately kept alive for the process lifetime: the
     advisory lock is released when the file object is closed.
     """
+    # yt-dlp still writes warnings/errors carrying the video title; if the app
+    # was launched from a console with stdout redirected, an unencodable title
+    # would otherwise raise inside the worker thread.
+    _make_stdout_lenient()
+
     lock = _acquire_instance_lock()
     if lock is None:
         root = tk.Tk()
