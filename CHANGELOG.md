@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `false`.
 - The thumbnail fetch timeout of 10s blocked Cancel for that whole window; now
   5s.
+- `_prompt` raised `ValueError` on a closed stdin: a closed file object is still
+  truthy, so the falsy guard missed it and `isatty()` blew up. An embedding host
+  that closed stdin before calling `main()` got a traceback rather than a clean
+  fallback.
+- A network failure was reported as a disk failure. `URLError`, `TimeoutError`
+  and `ConnectionResetError` are all `OSError` subclasses, so the CLI's handler
+  printed "Cannot write to '<dir>'" for a dropped connection, sending users
+  after the wrong problem. Disk failures now surface as `DownloadError` from
+  `download_video`'s own guard, and the `OSError` message is generic.
 - A video title containing non-Latin-1 characters (CJK, Arabic, emoji) crashed
   the CLI with `UnicodeEncodeError` whenever stdout was redirected, aborting a
   download that had already succeeded. Output streams are now reconfigured with

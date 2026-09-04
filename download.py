@@ -366,7 +366,12 @@ def download_video(
     prefer_direct_formats: bool = False,
 ) -> None:
     """Download a YouTube video to *output_dir*."""
-    os.makedirs(output_dir, exist_ok=True)
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+    except OSError as exc:
+        # Reported as a DownloadError so the caller can distinguish "cannot
+        # write here" from a network OSError, which is also an OSError.
+        raise DownloadError(f"Cannot create folder '{output_dir}': {exc}") from exc
 
     ydl_opts = build_ydl_opts(
         output_dir,
@@ -459,12 +464,17 @@ def _prompt(message: str, default: str = "") -> str:
 
     Guarding on isatty keeps piped and scripted invocations from dying with an
     uncaught EOFError.
+
+    The isatty() call is inside the try because a *closed* stdin is still
+    truthy, so the falsy check does not cover it and isatty() then raises
+    ValueError. An embedding host that closes stdin before calling main()
+    would otherwise get a traceback.
     """
-    if not sys.stdin or not sys.stdin.isatty():
-        return default
     try:
+        if not sys.stdin or not sys.stdin.isatty():
+            return default
         return input(message).strip() or default
-    except EOFError:
+    except (EOFError, ValueError, OSError):
         return default
 
 
@@ -528,7 +538,11 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\nDownload error: {e}")
         sys.exit(1)
     except OSError as e:
-        print(f"\nCannot write to '{output_dir}': {e}")
+        # Deliberately generic: URLError, TimeoutError and ConnectionResetError
+        # are all OSError subclasses, so naming the output directory here would
+        # send the user after the wrong problem. Disk failures arrive as
+        # DownloadError from download_video's own makedirs guard.
+        print(f"\nSystem error: {e}")
         sys.exit(1)
     except KeyboardInterrupt:
         # 130 = terminated by SIGINT.  Exiting 0 here reported success for an

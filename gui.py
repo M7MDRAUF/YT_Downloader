@@ -1322,10 +1322,19 @@ class App(tk.Tk):
             err_detail = _ANSI_RE.sub("", str(exc))[:300] or "Unexpected error occurred"
             self._safe_after(0, self._on_error, err_detail)
         finally:
-            # Discard finished process refs
-            with self._procs_lock:
-                self._child_procs = {p for p in self._child_procs if p.poll() is None}
+            # Re-enable the UI FIRST. Anything that runs before this is one
+            # more way to leave the app permanently disabled, which is the bug
+            # this whole structure exists to prevent.
             self._safe_after(0, self._reset_ui)
+            # Discard finished process refs. Mutate in place rather than
+            # rebinding: _track_child_processes' closure still holds a
+            # reference to this exact set, and a Popen registered as the block
+            # unwinds would otherwise land in an orphaned set and never be
+            # terminated on close.
+            with self._procs_lock:
+                self._child_procs.difference_update(
+                    {p for p in self._child_procs if p.poll() is not None}
+                )
 
     # ------------------------------------------------------------------
     # Result handlers
@@ -1439,12 +1448,16 @@ def main() -> None:
     try:
         App().mainloop()
     finally:
-        # Release the advisory lock and remove the file so a stale lock does
-        # not linger in the data directory after a crash.
+        # Close only — deliberately do NOT unlink the lock file.
+        #
+        # flock/msvcrt locks live on the inode, not the directory entry, so
+        # unlinking would let a second instance that had already reopened the
+        # path keep a valid lock on a now-nameless inode while a third instance
+        # created a fresh file and locked that too — two apps running at once.
+        # A leftover empty lock file is harmless: the guarantee comes from the
+        # lock, not from the file's absence.
         with contextlib.suppress(OSError):
             lock.close()
-        with contextlib.suppress(OSError):
-            os.remove(_LOCK_FILE)
 
 
 if __name__ == "__main__":

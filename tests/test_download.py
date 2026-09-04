@@ -624,7 +624,7 @@ class TestMain:
         with pytest.raises(SystemExit) as exc:
             download.main(["https://youtu.be/abc", "-o", "d"])
         assert exc.value.code == 1
-        assert "Cannot write to" in capsys.readouterr().out
+        assert "System error: read-only" in capsys.readouterr().out
 
     @pytest.mark.usefixtures("_ffmpeg_present")
     def test_exits_130_on_keyboard_interrupt(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -653,3 +653,69 @@ class TestStdoutEncoding:
     def test_survives_a_stream_without_reconfigure(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(download.sys, "stdout", io.StringIO())
         download._make_stdout_lenient()  # StringIO has no .reconfigure
+
+
+class TestPromptRobustness:
+    """_prompt must never raise, whatever state stdin is in."""
+
+    def test_closed_stdin_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A closed file object is still truthy, so a bare falsy check does not
+        # cover it and isatty() raises ValueError.
+        stream = io.StringIO()
+        stream.close()
+        monkeypatch.setattr(download.sys, "stdin", stream)
+        assert download._prompt("q: ", "fallback") == "fallback"
+
+    def test_none_stdin_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(download.sys, "stdin", None)
+        assert download._prompt("q: ", "fallback") == "fallback"
+
+    def test_isatty_raising_oserror_returns_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _Hostile(io.StringIO):
+            def isatty(self) -> bool:
+                raise OSError("detached")
+
+        monkeypatch.setattr(download.sys, "stdin", _Hostile())
+        assert download._prompt("q: ", "fallback") == "fallback"
+
+    def test_main_survives_closed_stdin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Regression: an embedding host that closed stdin got a traceback."""
+        monkeypatch.setattr(download, "has_ffmpeg", lambda: True)
+        stream = io.StringIO()
+        stream.close()
+        monkeypatch.setattr(download.sys, "stdin", stream)
+        seen: dict[str, object] = {}
+        monkeypatch.setattr(download, "download_video", lambda u, o, **k: seen.update(out=o))
+        download.main(["https://youtu.be/abc"])  # must not raise
+        assert seen["out"] == "downloads"
+
+
+class TestErrorAttribution:
+    """A network failure must not be reported as a disk failure."""
+
+    def test_makedirs_failure_is_a_download_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _boom(*_a: object, **_k: object) -> None:
+            raise PermissionError("read-only")
+
+        monkeypatch.setattr(download.os, "makedirs", _boom)
+        with pytest.raises(DownloadError, match="Cannot create folder"):
+            download.download_video("https://youtu.be/x", "/nope")
+
+    def test_network_oserror_is_not_blamed_on_the_folder(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from urllib.error import URLError
+
+        monkeypatch.setattr(download, "has_ffmpeg", lambda: True)
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise URLError("Connection reset by peer")
+
+        monkeypatch.setattr(download, "download_video", _boom)
+        with pytest.raises(SystemExit) as exc:
+            download.main(["https://youtu.be/abc", "-o", "downloads"])
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        # URLError is an OSError subclass; the message must not point at the dir.
+        assert "Cannot write to" not in out
+        assert "Connection reset" in out
