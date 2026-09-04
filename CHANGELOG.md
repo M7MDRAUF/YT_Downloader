@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `false`.
 - The thumbnail fetch timeout of 10s blocked Cancel for that whole window; now
   5s.
+- A video title containing non-Latin-1 characters (CJK, Arabic, emoji) crashed
+  the CLI with `UnicodeEncodeError` whenever stdout was redirected, aborting a
+  download that had already succeeded. Output streams are now reconfigured with
+  `errors="replace"`. This matters more now that the CLI is scriptable.
 
 ### Added
 

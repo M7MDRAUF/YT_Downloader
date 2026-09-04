@@ -636,3 +636,19 @@ class TestMain:
         with pytest.raises(SystemExit) as exc:
             download.main(["https://youtu.be/abc", "-o", "d"])
         assert exc.value.code == 130
+
+
+class TestStdoutEncoding:
+    """A non-ASCII video title must not kill a redirected CLI run."""
+
+    def test_unencodable_title_does_not_raise(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Emulate Windows redirecting stdout to a pipe: locale encoding, strict.
+        buf = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+        monkeypatch.setattr(download.sys, "stdout", buf)
+        download._make_stdout_lenient()
+        print("Title    : \u4f60\u597d caf\u00e9 \U0001f600")  # must not raise
+        buf.flush()
+
+    def test_survives_a_stream_without_reconfigure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(download.sys, "stdout", io.StringIO())
+        download._make_stdout_lenient()  # StringIO has no .reconfigure

@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import functools
 import importlib.util
 import os
@@ -467,8 +468,25 @@ def _prompt(message: str, default: str = "") -> str:
         return default
 
 
+def _make_stdout_lenient() -> None:
+    """Stop an unencodable video title from killing the download.
+
+    When stdout is redirected on Windows it falls back to the locale encoding
+    (typically cp1252), so printing a CJK or emoji title raises
+    UnicodeEncodeError and aborts a download that had otherwise succeeded.
+    Degrading those characters to '?' is strictly better than crashing, and
+    changing the encoding outright would produce mojibake in a real console.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            with contextlib.suppress(Exception):
+                reconfigure(errors="replace")
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_arg_parser().parse_args(argv)
+    _make_stdout_lenient()
 
     print("=" * 50)
     print("       YouTube Video Downloader (yt-dlp)")
