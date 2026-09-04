@@ -1,0 +1,27 @@
+# Mirrors the CI `quality` job. ruff and mypy already pass on this repo, so
+# wiring them locally costs nothing and prevents the drift that let a wrong
+# README default and a dead code branch survive several releases.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: mixed-line-ending
+        args: [--fix=lf]
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.15.0
+    hooks:
+      - id: mypy
+        files: ^(config|download|gui)\.py$
+        additional_dependencies: [types-yt-dlp]

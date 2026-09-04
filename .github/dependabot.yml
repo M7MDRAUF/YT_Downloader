@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # yt-dlp breaks whenever YouTube changes; requirements.txt pins only a lower
+  # bound, so without this nothing tells us a fix has shipped.
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      dev-tooling:
+        patterns:
+          - ruff
+          - mypy
+          - pytest*
+          - bandit
+          - vulture
+          - pip-audit
+          - types-*
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

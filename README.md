@@ -2,6 +2,7 @@
 
 A clean, dark-themed desktop GUI for downloading YouTube videos and playlists — powered by [yt-dlp](https://github.com/yt-dlp/yt-dlp).
 
+[![CI](https://github.com/M7MDRAUF/YT_Downloader/actions/workflows/ci.yml/badge.svg)](https://github.com/M7MDRAUF/YT_Downloader/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.11%2B-blue)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
@@ -71,8 +72,34 @@ python gui.py
 ### CLI
 
 ```bash
-python download.py [URL]
+python download.py "https://youtu.be/VIDEO_ID"
 ```
+
+Fully scriptable — it prompts only for values you omit, and only when attached
+to a terminal, so piped and non-interactive use works:
+
+```bash
+python download.py "https://youtu.be/VIDEO_ID" -o ~/Videos -f 1080p --subtitles
+```
+
+| Flag | Description |
+|------|-------------|
+| `-o`, `--output-dir` | Save folder (default: `./downloads`) |
+| `-f`, `--format` | `best`, `1080p`, `720p`, `480p`, `audio` (default: `best`) |
+| `--subtitles` | Download EN/AR subtitles |
+| `--sponsorblock` | Strip sponsor segments |
+| `--playlist` | Download the whole playlist |
+| `--prefer-direct` | Prefer direct HTTP formats over segmented transports |
+
+Exit codes: `0` success, `1` error, `130` cancelled with Ctrl-C.
+
+### Installed commands
+
+```bash
+pip install .
+```
+
+This provides `yt-downloader` (CLI) and `yt-downloader-gui` (GUI).
 
 ## Project Structure
 
@@ -82,13 +109,22 @@ YT_Downloader/
 ├── download.py         # yt-dlp wrapper, URL validation, CLI entry point
 ├── config.py           # Persistent JSON config (saves output dir, format, etc.)
 ├── tests/              # Pytest test suite
+│   ├── conftest.py     # Shared fixtures; keeps the suite offline and hermetic
 │   ├── test_config.py
 │   ├── test_download.py
 │   └── test_gui.py
+├── .github/
+│   ├── workflows/ci.yml    # Lint, types, tests, coverage, packaging
+│   ├── dependabot.yml
+│   └── copilot-instructions.md
 ├── pyproject.toml      # Project metadata + tool configs (ruff, mypy, pytest, etc.)
 ├── requirements.txt    # Core runtime dependencies
 ├── requirements-dev.txt# Dev/QA tool dependencies
+├── .pre-commit-config.yaml
 ├── .gitignore
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── SECURITY.md
 ├── LICENSE
 └── README.md
 ```
@@ -105,6 +141,24 @@ Settings are auto-saved to `.yt_config.json` under the app's platform-specific d
 | `sponsorblock`| `false`                        | Remove sponsor segments            |
 | `playlist`    | `false`                        | Download full playlist             |
 | `prefer_direct_formats` | `false`              | Prefer direct HTTP formats when available |
+
+Download history is kept separately in `.yt_history.json` in the same directory,
+capped at the 50 most recent entries. Both files are migrated automatically from
+the older location beside the source files, if one exists.
+
+## Security notes
+
+This app reads your browser cookie stores to authenticate downloads, and — when
+the bundled `yt-dlp-ejs` solver is missing — yt-dlp will fetch and execute
+challenge-solving JavaScript from the network at download time. Neither is
+unusual for a yt-dlp front end, but both are worth understanding. See
+[SECURITY.md](SECURITY.md).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). All checks in
+[the CI workflow](.github/workflows/ci.yml) must pass, and coverage must not
+regress.
 
 ## License
 
