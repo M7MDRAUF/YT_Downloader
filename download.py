@@ -199,6 +199,23 @@ def classify_stream_type(info: Mapping[str, Any]) -> str:
     return "media"
 
 
+def playlist_metadata_opts(opts: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *opts* tuned for a fast playlist-metadata probe.
+
+    A full ``extract_info`` resolves every entry (~2s each), which blocks for
+    minutes on a large playlist and never finishes on an infinite YouTube
+    Mix/Radio list.  ``extract_flat`` with ``playlistend=1`` returns the
+    playlist title and thumbnail in a second or two without resolving entries.
+
+    Returns a copy: the caller still needs the unmodified options for the
+    download phase itself.
+    """
+    flat = dict(opts)
+    flat["extract_flat"] = "in_playlist"
+    flat["playlistend"] = 1
+    return flat
+
+
 def extract_and_download(ydl: Any, url: str, info: dict[str, Any]) -> None:
     """Download *url* from already-extracted *info*.
 

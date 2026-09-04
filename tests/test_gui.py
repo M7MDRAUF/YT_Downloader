@@ -133,30 +133,17 @@ class TestSaveHistory:
             assert gui.save_history([]) is False
 
 
-class TestStreamTypeDetection:
-    """gui_hook tags progress updates with the stream type.
+class TestStreamTypeDependency:
+    """gui_hook tags progress updates using download.classify_stream_type.
 
-    These used to test a copy of the logic pasted into this file, which could
-    never catch a regression in the real code.  They now call the shared
-    implementation in download.py.
+    The exhaustive cases live in tests/test_download.py, where the function
+    does.  This asserts only the wiring — that gui.py still routes through the
+    shared implementation rather than growing its own copy again, which is
+    exactly the drift that produced the old mirrored test.
     """
 
-    @pytest.mark.parametrize(
-        ("vcodec", "acodec", "expected"),
-        [
-            ("avc1.64001f", "none", "video"),
-            ("none", "mp4a.40.2", "audio"),
-            ("avc1.64001f", "mp4a.40.2", "combined"),
-            ("none", "none", "media"),
-            ("vp9", "none", "video"),
-            ("none", "opus", "audio"),
-        ],
-    )
-    def test_stream_type_classification(self, vcodec: str, acodec: str, expected: str) -> None:
-        assert download.classify_stream_type({"vcodec": vcodec, "acodec": acodec}) == expected
-
-    def test_missing_codec_keys_default_to_media(self) -> None:
-        assert download.classify_stream_type({}) == "media"
+    def test_gui_uses_the_shared_classifier(self) -> None:
+        assert gui.classify_stream_type is download.classify_stream_type
 
 
 class TestHistoryCsvRows:
@@ -198,10 +185,35 @@ class TestTrackChildProcesses:
         assert proc in sink
 
     def test_uses_lock_when_supplied(self) -> None:
+        """The lock must actually be entered around the sink mutation.
+
+        Asserting `not lock.locked()` afterwards proved nothing — a lock that
+        was never acquired is also unlocked, so deleting the whole lock branch
+        left this test passing.  Record the acquisitions instead.
+        """
+        acquisitions: list[str] = []
+
+        class RecordingLock:
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+
+            def __enter__(self) -> None:
+                self._lock.acquire()
+                acquisitions.append("enter")
+
+            def __exit__(self, *_exc: object) -> None:
+                self._lock.release()
+
         sink: set[object] = set()
-        lock = threading.Lock()
-        with gui._track_child_processes(sink, lock):
+        with gui._track_child_processes(sink, RecordingLock()):
             proc = subprocess.Popen([sys.executable, "-c", "pass"])
             proc.wait()
         assert proc in sink
-        assert not lock.locked()
+        assert acquisitions == ["enter"], "sink was mutated without holding the lock"
+
+    def test_no_lock_still_registers(self) -> None:
+        sink: set[object] = set()
+        with gui._track_child_processes(sink, None):
+            proc = subprocess.Popen([sys.executable, "-c", "pass"])
+            proc.wait()
+        assert proc in sink

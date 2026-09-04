@@ -79,9 +79,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tests no longer read your browser cookie databases.** `build_ydl_opts()`
   reaches `get_cookies_browser()`, and 25 tests called it with nothing mocking it.
   Suite runtime dropped from 0.59s to ~0.35s as a side effect.
-- Coverage 32% to 47%; `download.py` 62% to 97%; `config.py` 73% to 89%. Gate
+- Coverage 32% to 48.6%; `download.py` 62% to 98%; `config.py` 73% to 89%. Gate
   raised from 35 to 45, with a new 85% floor on `download.py` and `config.py` so
   the blended number cannot let the core hide behind untestable GUI code.
+  Stated plainly: `_build_ui` and `_apply_styles` carry `# pragma: no cover`,
+  which hides ~92 statements. Unexcluded, coverage is **44.0%**, not 48.6%. The
+  exclusion is defensible — the headless tkinter stub has bodyless widget
+  classes, so `_build_ui` genuinely cannot execute under test — but the number
+  should not be read as if those 92 statements were verified.
 - Format labels, stream classification, and the extract-then-download flow are
   now single-sourced in `download.py`. The GUI and CLI copies had already drifted
   apart.

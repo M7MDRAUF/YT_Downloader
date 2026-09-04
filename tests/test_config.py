@@ -169,3 +169,54 @@ class TestAtomicWriteJsonEdgeCases:
         config.atomic_write_json(str(target), {"a": 2})
         assert json.loads(target.read_text(encoding="utf-8")) == {"a": 2}
         assert list(tmp_path.iterdir()) == [target]
+
+
+class TestAtomicWriteJsonAtomicity:
+    """The property the function exists for: a failed write never clobbers.
+
+    A mutant that replaced mkstemp+os.replace with a plain truncating open()
+    survived the whole suite, because nothing asserted that the pre-existing
+    file is still intact after a write fails part-way through.
+    """
+
+    def test_failed_write_leaves_the_previous_file_intact(self, tmp_path: pathlib.Path) -> None:
+        target = tmp_path / "cfg.json"
+        config.atomic_write_json(str(target), {"good": "original"})
+
+        class _ExplodesHalfwayThrough:
+            """json.dump writes incrementally, so this fails mid-serialisation."""
+
+            def __repr__(self) -> str:
+                raise RuntimeError("boom")
+
+        with pytest.raises((TypeError, RuntimeError)):
+            config.atomic_write_json(
+                str(target), {"a": "x" * 5000, "bad": _ExplodesHalfwayThrough()}
+            )
+
+        # The original content must survive untouched — this is the whole point.
+        assert json.loads(target.read_text(encoding="utf-8")) == {"good": "original"}
+
+    def test_no_temp_files_survive_a_failure(self, tmp_path: pathlib.Path) -> None:
+        target = tmp_path / "cfg.json"
+        config.atomic_write_json(str(target), {"good": "original"})
+
+        class _Unserialisable:
+            pass
+
+        with pytest.raises(TypeError):
+            config.atomic_write_json(str(target), {"bad": _Unserialisable()})
+
+        assert [p.name for p in tmp_path.iterdir()] == ["cfg.json"]
+
+    def test_target_is_never_a_partial_file(self, tmp_path: pathlib.Path) -> None:
+        """Concurrent readers must see either the old or new content, never half."""
+        target = tmp_path / "cfg.json"
+        config.atomic_write_json(str(target), {"n": 1})
+        seen: list[dict[str, int]] = []
+
+        for payload in ({"n": 2, "pad": "y" * 20000}, {"n": 3}):
+            config.atomic_write_json(str(target), payload)
+            seen.append(json.loads(target.read_text(encoding="utf-8")))
+
+        assert [d["n"] for d in seen] == [2, 3]

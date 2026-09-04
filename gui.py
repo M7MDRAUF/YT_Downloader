@@ -13,6 +13,7 @@ import threading
 import time
 import tkinter as tk
 from collections.abc import Iterator
+from contextlib import AbstractContextManager
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
 from urllib.parse import urlparse
@@ -31,6 +32,7 @@ from download import (
     get_ydl_version,
     has_ffmpeg,
     is_valid_url,
+    playlist_metadata_opts,
 )
 
 _has_pil: bool | None = None  # None = not yet checked
@@ -220,7 +222,9 @@ def _make_card(parent: tk.Misc) -> tuple[tk.Frame, tk.Frame]:
 
 
 @contextlib.contextmanager
-def _track_child_processes(sink: set[Any], lock: threading.Lock | None = None) -> Iterator[None]:
+def _track_child_processes(
+    sink: set[Any], lock: AbstractContextManager[Any] | None = None
+) -> Iterator[None]:
     """Register every ``Popen`` created inside the block into *sink*.
 
     yt-dlp spawns ffmpeg via :class:`subprocess.Popen`; tracking those handles
@@ -1223,9 +1227,7 @@ class App(tk.Tk):
                             # on infinite YouTube Mix/Radio lists (list=RD…).
                             # extract_flat with playlistend=1 returns the playlist
                             # title + thumbnail in ~1-2 s without resolving entries.
-                            flat_opts = dict(opts)
-                            flat_opts["extract_flat"] = "in_playlist"
-                            flat_opts["playlistend"] = 1  # only need playlist-level metadata
+                            flat_opts = playlist_metadata_opts(opts)
                             with yt_dlp.YoutubeDL(flat_opts) as flat_ydl:  # type: ignore[arg-type]
                                 raw = flat_ydl.extract_info(url, download=False)
                             if not raw:

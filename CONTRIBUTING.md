@@ -42,6 +42,12 @@ python -m bandit -c pyproject.toml -r . && python -m vulture
 Coverage must not regress. The gate is 45% overall, with a separate 85% floor on
 `download.py` and `config.py`.
 
+Read the headline number with one caveat: `_build_ui` and `_apply_styles` are
+marked `# pragma: no cover`, hiding ~92 statements of pure `pack()` wiring that
+cannot run under the headless tkinter stub. Unexcluded, coverage is ~44% rather
+than ~49%. Do not add new pragmas to make a number look better — extract the
+logic and test it instead.
+
 ```bash
 python -m pytest tests/ --cov=. --cov-report=term-missing --cov-fail-under=45
 ```

@@ -13,6 +13,7 @@ Two jobs, both about making the suite hermetic:
 
 import sys
 import types
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -120,7 +121,13 @@ def real_cookie_probe(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 @pytest.fixture
-def fake_ydl() -> type[FakeYDL]:
-    """Return the fake yt-dlp driver, with its recorded instances reset."""
+def fake_ydl() -> Iterator[type[FakeYDL]]:
+    """Return the fake yt-dlp driver, with its recorded instances reset.
+
+    Clears on teardown as well as setup: `instances` is module-level state, so
+    a stale entry would otherwise be visible to any later test that touches
+    FakeYDL without requesting this fixture.
+    """
     FakeYDL.instances = []
-    return FakeYDL
+    yield FakeYDL
+    FakeYDL.instances = []

@@ -122,15 +122,20 @@ class TestBuildYdlOpts:
         assert "lazy_playlist" not in opts
 
     def test_playlist_flat_opts_for_metadata(self) -> None:
-        """Verify the extract_flat technique used by gui.py for fast playlist metadata."""
+        """The extract_flat probe gui.py uses for fast playlist metadata.
+
+        Previously this test built the flat dict itself and asserted the values
+        it had just written, so it passed no matter what the code did.  It now
+        calls the real playlist_metadata_opts().
+        """
         opts = download.build_ydl_opts(playlist=True, quiet=True)
-        flat_opts = dict(opts)
-        flat_opts["extract_flat"] = "in_playlist"
-        flat_opts["playlistend"] = 1
-        # flat_opts should keep all base settings but override for metadata
-        assert flat_opts["extract_flat"] == "in_playlist"
-        assert flat_opts["playlistend"] == 1
-        # Original opts must be unchanged (200 for download phase)
+        flat = download.playlist_metadata_opts(opts)
+        assert flat["extract_flat"] == "in_playlist"
+        assert flat["playlistend"] == 1
+        # Base settings survive the copy.
+        assert flat["format"] == opts["format"]
+        assert flat["outtmpl"] == opts["outtmpl"]
+        # The caller still needs the originals for the download phase.
         assert opts["playlistend"] == download._DEFAULT_PLAYLIST_LIMIT
         assert "extract_flat" not in opts
 
@@ -301,7 +306,12 @@ class TestClassifyStreamType:
 class TestHasFfmpeg:
     def test_returns_bool(self) -> None:
         download.has_ffmpeg.cache_clear()
-        assert isinstance(download.has_ffmpeg(), bool)
+        try:
+            assert isinstance(download.has_ffmpeg(), bool)
+        finally:
+            # Do not leave this machine's real ffmpeg result cached for
+            # whatever test runs next.
+            download.has_ffmpeg.cache_clear()
 
     def test_false_when_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
         download.has_ffmpeg.cache_clear()
@@ -488,7 +498,6 @@ class TestDownloadVideo:
     ) -> None:
         monkeypatch.setattr(download.yt_dlp, "YoutubeDL", fake_ydl)
         fake_ydl.instances.clear()
-        monkeypatch.setattr(fake_ydl, "info", None, raising=False)
         ydl_holder: list[object] = []
 
         class _Playlist(fake_ydl):  # type: ignore[valid-type,misc]
@@ -719,3 +728,70 @@ class TestErrorAttribution:
         # URLError is an OSError subclass; the message must not point at the dir.
         assert "Cannot write to" not in out
         assert "Connection reset" in out
+
+
+class TestCookiesBranch:
+    """The cookies-found branch of build_ydl_opts.
+
+    The autouse hermeticity fixture stubs get_cookies_browser to return None,
+    which left this line unexercised — the one real coverage cost of keeping
+    the suite out of the developer's cookie stores.
+    """
+
+    def test_sets_cookiesfrombrowser_when_a_browser_is_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "get_cookies_browser", lambda: "firefox")
+        opts = download.build_ydl_opts()
+        assert opts["cookiesfrombrowser"] == ("firefox",)
+
+    def test_omits_cookiesfrombrowser_when_none_found(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(download, "get_cookies_browser", lambda: None)
+        assert "cookiesfrombrowser" not in download.build_ydl_opts()
+
+
+class TestBundledEjsDetection:
+    def test_detects_an_importable_package(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        download._has_bundled_ejs.cache_clear()
+        monkeypatch.setattr(download.importlib.util, "find_spec", lambda _n: object())
+        try:
+            assert download._has_bundled_ejs() is True
+        finally:
+            download._has_bundled_ejs.cache_clear()
+
+    def test_detects_a_missing_package(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        download._has_bundled_ejs.cache_clear()
+        monkeypatch.setattr(download.importlib.util, "find_spec", lambda _n: None)
+        try:
+            assert download._has_bundled_ejs() is False
+        finally:
+            download._has_bundled_ejs.cache_clear()
+
+
+class TestMergeOutputFormat:
+    def test_video_presets_merge_to_mp4(self) -> None:
+        for preset in ("best", "1080p", "720p", "480p"):
+            opts = download.build_ydl_opts(format_preset=preset)
+            assert opts["merge_output_format"] == "mp4", preset
+
+    def test_audio_preset_does_not_merge_video(self) -> None:
+        assert "merge_output_format" not in download.build_ydl_opts(format_preset="audio")
+
+
+class TestStdoutLenientCoversStderr:
+    def test_reconfigures_both_streams(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        seen: list[str] = []
+
+        class _Stream:
+            def __init__(self, name: str) -> None:
+                self._name = name
+
+            def reconfigure(self, **kwargs: object) -> None:
+                seen.append(f"{self._name}:{kwargs['errors']}")
+
+        monkeypatch.setattr(download.sys, "stdout", _Stream("stdout"))
+        monkeypatch.setattr(download.sys, "stderr", _Stream("stderr"))
+        download._make_stdout_lenient()
+        assert seen == ["stdout:replace", "stderr:replace"]
