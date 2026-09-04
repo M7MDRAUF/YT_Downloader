@@ -23,5 +23,5 @@ repos:
     rev: v1.15.0
     hooks:
       - id: mypy
-        files: ^(config|download|gui)\.py$
+        files: ^(config|download|gui).py$
         additional_dependencies: [types-yt-dlp]

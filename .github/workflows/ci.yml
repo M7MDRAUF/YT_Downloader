@@ -42,7 +42,7 @@ jobs:
         run: python -m ruff format --check .
 
       - name: Type check (mypy)
-        run: python -m mypy config.py download.py gui.py
+        run: python -m mypy config.py download.py gui.py tests
 
       - name: Security (bandit)
         run: python -m bandit -c pyproject.toml -r .

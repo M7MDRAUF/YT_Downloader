@@ -32,7 +32,7 @@ python -m ruff check . && python -m ruff format --check .
 ```
 
 ```bash
-python -m mypy config.py download.py gui.py
+python -m mypy config.py download.py gui.py tests
 ```
 
 ```bash

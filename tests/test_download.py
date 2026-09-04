@@ -11,6 +11,7 @@ import pytest
 
 import download
 from download import DownloadError
+from tests.helpers import FakeYDL
 
 
 class TestIsValidUrl:
@@ -359,8 +360,8 @@ class TestGetCookiesBrowser:
             def __enter__(self) -> "_OK":
                 return self
 
-            def __exit__(self, *_e: object) -> bool:
-                return False
+            def __exit__(self, *_e: object) -> None:
+                return None
 
         monkeypatch.setattr(download.yt_dlp, "YoutubeDL", _OK)
         assert download.get_cookies_browser() == download._BROWSERS[0]
@@ -483,7 +484,7 @@ def _ffmpeg_present(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class TestDownloadVideo:
     def test_playlist_uses_download(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type[FakeYDL]
     ) -> None:
         monkeypatch.setattr(download.yt_dlp, "YoutubeDL", fake_ydl)
         fake_ydl.instances.clear()
@@ -501,7 +502,7 @@ class TestDownloadVideo:
         assert ydl_holder[0].download_calls == [["https://youtu.be/x"]]  # type: ignore[attr-defined]
 
     def test_single_video_uses_process_info(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type[FakeYDL]
     ) -> None:
         fake_ydl.instances.clear()
         monkeypatch.setattr(download.yt_dlp, "YoutubeDL", fake_ydl)
@@ -512,7 +513,7 @@ class TestDownloadVideo:
         assert ydl.extract_calls == [("https://youtu.be/x", False)]
 
     def test_raises_when_info_is_empty(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type[FakeYDL]
     ) -> None:
         class _NoInfo(fake_ydl):  # type: ignore[valid-type,misc]
             def extract_info(self, url: str, download: bool = True) -> None:
@@ -523,7 +524,7 @@ class TestDownloadVideo:
             download.download_video("https://youtu.be/x", str(tmp_path))
 
     def test_creates_output_dir(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type[FakeYDL]
     ) -> None:
         monkeypatch.setattr(download.yt_dlp, "YoutubeDL", fake_ydl)
         target = tmp_path / "nested" / "dir"
@@ -531,7 +532,7 @@ class TestDownloadVideo:
         assert target.is_dir()
 
     def test_passes_options_through(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, fake_ydl: type[FakeYDL]
     ) -> None:
         fake_ydl.instances.clear()
         monkeypatch.setattr(download.yt_dlp, "YoutubeDL", fake_ydl)
